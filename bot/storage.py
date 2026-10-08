@@ -32,10 +32,10 @@ CREATE TABLE IF NOT EXISTS lead_overrides (
 );
 CREATE TABLE IF NOT EXISTS field_timers (
     guild_id INTEGER NOT NULL,
-    boss     TEXT    NOT NULL,
-    zone     TEXT    NOT NULL DEFAULT '',
+    boss     TEXT    NOT NULL COLLATE NOCASE,
+    zone     TEXT    NOT NULL DEFAULT '' COLLATE NOCASE,
     spawn_at INTEGER NOT NULL,
-    PRIMARY KEY (guild_id, boss)
+    PRIMARY KEY (guild_id, boss, zone)
 );
 CREATE TABLE IF NOT EXISTS routes (
     guild_id   INTEGER NOT NULL,
@@ -105,6 +105,15 @@ class Storage:
     def __init__(self, path: str):
         self.db = sqlite3.connect(path)
         self.db.executescript(SCHEMA)
+        # Older versions keyed field timers by boss only, so the same boss in two zones collided.
+        pk = {row[1] for row in self.db.execute("PRAGMA table_info(field_timers)") if row[5]}
+        if "zone" not in pk:
+            self.db.executescript(
+                "ALTER TABLE field_timers RENAME TO field_timers_old;"
+                + SCHEMA[SCHEMA.index("CREATE TABLE IF NOT EXISTS field_timers"):SCHEMA.index("CREATE TABLE IF NOT EXISTS routes")]
+                + "INSERT OR REPLACE INTO field_timers SELECT guild_id, boss, zone, spawn_at FROM field_timers_old;"
+                "DROP TABLE field_timers_old;"
+            )
         # Add settings columns that databases from older versions don't have yet.
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(guild_config)")}
         for name, ddl in _CONFIG_COLUMNS.items():
@@ -176,10 +185,10 @@ class Storage:
         self.db.commit()
 
     def set_field_timer(self, guild_id: int, boss: str, zone: str, spawn_at: int) -> None:
-        """Add or replace the timer for a field boss (one pending spawn per boss)."""
+        """Add or replace the timer for a field boss (one pending spawn per boss and zone)."""
         self.db.execute(
             "INSERT INTO field_timers (guild_id, boss, zone, spawn_at) VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(guild_id, boss) DO UPDATE SET zone = excluded.zone, spawn_at = excluded.spawn_at",
+            "ON CONFLICT(guild_id, boss, zone) DO UPDATE SET spawn_at = excluded.spawn_at",
             (guild_id, boss, zone, spawn_at),
         )
         self.db.commit()
@@ -191,10 +200,14 @@ class Storage:
             (guild_id,),
         ).fetchall()
 
-    def remove_field_timer(self, guild_id: int, boss: str) -> bool:
-        cur = self.db.execute(
-            "DELETE FROM field_timers WHERE guild_id = ? AND lower(boss) = lower(?)", (guild_id, boss)
-        )
+    def remove_field_timer(self, guild_id: int, boss: str, zone: str | None = None) -> bool:
+        """Remove a boss's timer in one zone, or in every zone when zone is None."""
+        if zone is None:
+            cur = self.db.execute("DELETE FROM field_timers WHERE guild_id = ? AND boss = ?", (guild_id, boss))
+        else:
+            cur = self.db.execute(
+                "DELETE FROM field_timers WHERE guild_id = ? AND boss = ? AND zone = ?", (guild_id, boss, zone)
+            )
         self.db.commit()
         return cur.rowcount > 0
 

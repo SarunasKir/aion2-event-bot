@@ -98,10 +98,14 @@ class EventBot(discord.Client):
 
     @tasks.loop(hours=24)
     async def refresh_schedule(self) -> None:
-        changes, _, versions = await self.update_schedule()
+        try:
+            changes, _, versions = await self.update_schedule()
+        except Exception:  # an unhandled error would stop this loop for good
+            log.exception("Daily schedule check failed")
+            return
         if not changes:
             return
-        text = (
+        text = _fit(
             "📅 **aion2hub updated its schedule**, so these times changed:\n"
             + "\n".join(f"• {c.line()}" for c in changes)
             + (f"\n-# Source data: {', '.join(versions)}" if versions else "")
@@ -124,19 +128,25 @@ class EventBot(discord.Client):
         if interaction.type != discord.InteractionType.component:
             return
         custom_id = (interaction.data or {}).get("custom_id", "")
+        if not interaction.guild_id:
+            return
         if custom_id.startswith(views.ROLE_PREFIX):
-            await views.toggle_role(interaction, int(custom_id[len(views.ROLE_PREFIX):]))
-        elif custom_id.startswith(views.KILLED_PREFIX) and interaction.guild_id:
-            await self._boss_killed(interaction, custom_id[len(views.KILLED_PREFIX):])
+            role_id = custom_id[len(views.ROLE_PREFIX):]
+            allowed = set(_ping_role_ids(self, interaction.guild_id))
+            await views.toggle_role(interaction, int(role_id) if role_id.isdigit() else 0, allowed)
+        elif custom_id.startswith(views.KILLED_PREFIX):
+            boss, zone = views.parse_killed(custom_id)
+            await self._boss_killed(interaction, fieldboss.clean_name(boss), fieldboss.clean_name(zone))
 
-    async def _boss_killed(self, interaction: discord.Interaction, boss: str) -> None:
+    async def _boss_killed(self, interaction: discord.Interaction, boss: str, zone: str = "") -> None:
         gid = interaction.guild_id
+        if not boss:
+            return
         known = self.storage.respawn_minutes(gid, boss)
 
         async def start_timer(inter: discord.Interaction, minutes: int) -> None:
             cfg = _config(self, gid)
             spawn = datetime.now(timezone.utc) + timedelta(minutes=minutes)
-            zone = next((z for b, z, _ in self.storage.field_timers(gid) if b.lower() == boss.lower()), "")
             self.storage.set_field_timer(gid, boss, zone, int(spawn.timestamp()))
             await inter.response.send_message(
                 f"✅ **{boss}** killed by {inter.user.mention}. Next spawn <t:{int(spawn.timestamp())}:R>, "
@@ -170,9 +180,12 @@ class EventBot(discord.Client):
                 await self._check_guild(cfg, now)
             except Exception:
                 log.exception("Check failed for guild %s", cfg.guild_id)
-        await self._delete_old_pings(now)
-        self.storage.prune_field_timers(int((now - timedelta(hours=1)).timestamp()))
-        self.storage.prune_sent(int((now - timedelta(days=2)).timestamp()))
+        try:
+            await self._delete_old_pings(now)
+            self.storage.prune_field_timers(int((now - timedelta(hours=1)).timestamp()))
+            self.storage.prune_sent(int((now - timedelta(days=2)).timestamp()))
+        except Exception:  # an unhandled error would stop the check loop for good
+            log.exception("Cleanup failed")
 
     def _target(self, cfg: GuildConfig, category: str) -> tuple[int | None, int | None]:
         """(channel_id, role_id) for a category: its own route if set, else the server defaults."""
@@ -196,7 +209,7 @@ class EventBot(discord.Client):
                 return
             channel_id, role_id = self._target(cfg, category)
             delete_at = int(start.timestamp()) + cfg.delete_after * 60 if cfg.delete_after is not None else None
-            out.append(Outgoing(pending, channel_id, text_for_role(role_id), view, delete_at))
+            out.append(Outgoing(pending, channel_id, text_for_role(role_id), view, delete_at, role_id))
 
         # Advance pings, one message per start time and category
         groups: dict[tuple[datetime, str], list] = {}
@@ -208,8 +221,8 @@ class EventBot(discord.Client):
 
         field = due_field(cfg, self.storage.field_timers(gid), now, overrides)
         for boss, zone, start in field:
-            add([(f"field:{boss.lower()}", int(start.timestamp()))], "field", start,
-                lambda r, b=boss, z=zone, st=start: format_field_ping(b, z, st, cfg, r), views.killed_view(boss))
+            add([(f"field:{boss.lower()}|{zone.lower()}", int(start.timestamp()))], "field", start,
+                lambda r, b=boss, z=zone, st=start: format_field_ping(b, z, st, cfg, r), views.killed_view(boss, zone))
 
         if cfg.start_ping:
             starting = replace(cfg, lead_minutes=0)
@@ -220,8 +233,8 @@ class EventBot(discord.Client):
                 keys = [(f"start:{e.key}", int(start.timestamp())) for e in events]
                 add(keys, category, start, lambda r, ev=events: format_start_ping([e.name for e in ev], cfg, r))
             for boss, zone, start in due_field(starting, self.storage.field_timers(gid), now, {FIELD_LEAD_KEY: 0}):
-                add([(f"start:field:{boss.lower()}", int(start.timestamp()))], "field", start,
-                    lambda r, b=boss: format_start_ping([b], cfg, r), views.killed_view(boss))
+                add([(f"start:field:{boss.lower()}|{zone.lower()}", int(start.timestamp()))], "field", start,
+                    lambda r, b=boss: format_start_ping([b], cfg, r), views.killed_view(boss, zone))
 
         if cfg.digest:
             reset = next_reset(cfg, now - timedelta(minutes=10))
@@ -229,7 +242,7 @@ class EventBot(discord.Client):
                 key = ("digest", int(reset.timestamp()))
                 if not self.storage.was_sent(gid, *key):
                     text = format_digest(cfg, followed, self.storage.field_timers(gid), now)
-                    out.append(Outgoing([key], cfg.channel_id, text, None, None, mention=False))
+                    out.append(Outgoing([key], cfg.channel_id, text, None, None, None))
         return out
 
     async def _check_guild(self, cfg: GuildConfig, now: datetime) -> None:
@@ -265,7 +278,7 @@ class EventBot(discord.Client):
                 kwargs = {"view": msg.view} if msg.view is not None else {}
                 posted = await channel.send(
                     msg.text,
-                    allowed_mentions=discord.AllowedMentions(roles=True) if msg.mention else discord.AllowedMentions.none(),
+                    allowed_mentions=_only_role(msg.role_id),
                     **kwargs,
                 )
             except discord.Forbidden:
@@ -278,6 +291,10 @@ class EventBot(discord.Client):
                 )
                 continue
             except discord.HTTPException as e:
+                if 400 <= e.status < 500 and e.status != 429:
+                    # The message itself was rejected; retrying would fail the same way.
+                    log.error("Ping in guild %s rejected (%s %s): %s", cfg.guild_id, e.status, e.text, [k for k, _ in msg.keys])
+                    continue
                 for key, ts in msg.keys:
                     self.storage.unmark_sent(cfg.guild_id, key, ts)
                 log.warning("Ping in guild %s failed (%s); will retry: %s", cfg.guild_id, e.status, [k for k, _ in msg.keys])
@@ -334,6 +351,20 @@ class EventBot(discord.Client):
         await self.wait_until_ready()
 
 
+def _only_role(role_id: int | None) -> discord.AllowedMentions:
+    """Allow pinging just this role. Boss and zone names come from users, so they must never
+    be able to trigger @everyone, other roles or user mentions."""
+    roles = [discord.Object(id=role_id)] if role_id else False
+    return discord.AllowedMentions(everyone=False, users=False, roles=roles, replied_user=False)
+
+
+def _ping_role_ids(bot: "EventBot", guild_id: int) -> list[int]:
+    """The /setup role and any /route roles: the only roles the Notify-me buttons may change."""
+    cfg = _config(bot, guild_id)
+    ids = [cfg.role_id] + [r for _, r in bot.storage.routes(guild_id).values()]
+    return [i for i in dict.fromkeys(ids) if i]
+
+
 @dataclass
 class Outgoing:
     keys: list[tuple[str, int]]  # (sent key, start timestamp) this message covers
@@ -341,7 +372,14 @@ class Outgoing:
     text: str
     view: discord.ui.View | None
     delete_at: int | None
-    mention: bool = True
+    role_id: int | None  # the only thing this message may mention
+
+
+def _fit(text: str, limit: int = 2000) -> str:
+    """Cut a message to Discord's length limit at a line break."""
+    if len(text) <= limit:
+        return text
+    return text[: limit - 20].rsplit("\n", 1)[0] + "\n…and more."
 
 
 def _config(bot: EventBot, guild_id: int) -> GuildConfig:
@@ -549,7 +587,7 @@ def register_commands(bot: EventBot) -> None:
             lines.append(f"-# Source data: {', '.join(versions)}")
         if not AUTO_UPDATE:
             lines.append("-# The daily automatic check is turned off (SCHEDULE_AUTO_UPDATE=0).")
-        await interaction.followup.send("\n".join(lines), ephemeral=True)
+        await interaction.followup.send(_fit("\n".join(l for l in lines if l)), ephemeral=True)
 
     field = app_commands.Group(
         name="fieldboss",
@@ -625,7 +663,10 @@ def register_commands(bot: EventBot) -> None:
                     "I couldn't read the respawn time. Use something like `2h` or `1h 30m`.", ephemeral=True
                 )
                 return
-        timer = fieldboss.FieldTimer(boss.strip()[:80], zone.strip()[:80], spawn)
+        timer = fieldboss.FieldTimer(fieldboss.clean_name(boss), fieldboss.clean_name(zone), spawn)
+        if not timer.boss:
+            await interaction.response.send_message("Give the boss a name.", ephemeral=True)
+            return
         bot.storage.set_field_timer(interaction.guild_id, timer.boss, timer.zone, int(spawn.timestamp()))
         extra = ""
         if respawn_minutes:
@@ -638,7 +679,9 @@ def register_commands(bot: EventBot) -> None:
     @field.command(name="remove", description="Remove a field boss timer.")
     @app_commands.describe(boss="Boss name, as shown in /events")
     async def field_remove(interaction: discord.Interaction, boss: str) -> None:
-        removed = bot.storage.remove_field_timer(interaction.guild_id, boss.strip())
+        name, sep, zone = boss.partition("|")
+        removed = bot.storage.remove_field_timer(interaction.guild_id, name.strip(), zone.strip() if sep else None)
+        boss = f"{name.strip()} ({zone.strip()})" if sep and zone.strip() else name.strip()
         await interaction.response.send_message(
             f"Removed **{boss}**." if removed else f"No timer for **{boss}**. See /events for the list.",
             ephemeral=True,
@@ -646,8 +689,12 @@ def register_commands(bot: EventBot) -> None:
 
     @field_remove.autocomplete("boss")
     async def field_remove_names(interaction: discord.Interaction, current: str):
-        names = [b for b, _, _ in bot.storage.field_timers(interaction.guild_id)]
-        return [app_commands.Choice(name=n, value=n) for n in names if current.lower() in n.lower()][:25]
+        timers = bot.storage.field_timers(interaction.guild_id)
+        return [
+            app_commands.Choice(name=f"{b} ({z})" if z else b, value=f"{b}|{z}")
+            for b, z, _ in timers
+            if current.lower() in f"{b} {z}".lower()
+        ][:25]
 
     @field_add.autocomplete("boss")
     async def field_add_names(interaction: discord.Interaction, current: str):
@@ -688,13 +735,7 @@ def register_commands(bot: EventBot) -> None:
     @admin
     @app_commands.guild_only()
     async def role_menu(interaction: discord.Interaction) -> None:
-        cfg = _config(bot, interaction.guild_id)
-        ids = [cfg.role_id] + [r for _, r in bot.storage.routes(interaction.guild_id).values()]
-        roles = []
-        for rid in ids:
-            role = interaction.guild.get_role(rid) if rid else None
-            if role is not None and role not in roles:
-                roles.append(role)
+        roles = [r for r in map(interaction.guild.get_role, _ping_role_ids(bot, interaction.guild_id)) if r]
         if not roles:
             await interaction.response.send_message("Set a role with /setup or /route first.", ephemeral=True)
             return
@@ -703,11 +744,15 @@ def register_commands(bot: EventBot) -> None:
             warn = "\n⚠️ I need **Manage Roles**, and my role must be above these roles, for the buttons to work."
         else:
             warn = ""
+        try:
+            await interaction.channel.send(
+                "**Get pinged for Aion 2 events and bosses.** Tap a button to turn a ping role on or off.",
+                view=views.role_menu_view(roles),
+            )
+        except discord.HTTPException:
+            await interaction.response.send_message("I can't post in this channel. Check my permissions here.", ephemeral=True)
+            return
         await interaction.response.send_message("Posted the role buttons." + warn, ephemeral=True)
-        await interaction.channel.send(
-            "**Get pinged for Aion 2 events and bosses.** Tap a button to turn a ping role on or off.",
-            view=views.role_menu_view(roles),
-        )
 
     @bot.tree.command(name="quiet-hours", description="Don't ping for anything starting between these server times.")
     @admin
@@ -789,7 +834,7 @@ def register_commands(bot: EventBot) -> None:
         start = datetime.now(timezone.utc) + timedelta(minutes=cfg.lead_minutes)
         await channel.send(
             "🧪 Test announcement\n" + format_ping([event], start, cfg),
-            allowed_mentions=discord.AllowedMentions(roles=True),
+            allowed_mentions=_only_role(cfg.role_id),
         )
         await interaction.response.send_message(f"Sent a test to {channel.mention}.", ephemeral=True)
 

@@ -152,7 +152,7 @@ def test_killed_button_restarts_timer(tmp_path):
         guild_id=1, user=types.SimpleNamespace(mention="@Sam"),
         response=types.SimpleNamespace(send_message=send_message),
     )
-    asyncio.run(bot._boss_killed(inter, "Silent Dartan"))
+    asyncio.run(bot._boss_killed(inter, "Silent Dartan", "Altgard"))
     (boss, zone, ts), = bot.storage.field_timers(1)
     assert (boss, zone) == ("Silent Dartan", "Altgard")
     assert abs(ts - (time.time() + 7200)) < 5
@@ -167,4 +167,59 @@ def test_field_ping_has_killed_button(tmp_path):
     tick(bot, now)
     text, kw = chans[10].sent[0]
     assert "Silent Dartan" in text
-    assert kw["view"].children[0].custom_id == "aion2:killed:Silent Dartan"
+    assert kw["view"].children[0].custom_id == "aion2:killed:Silent Dartan|"
+
+
+def test_pings_can_only_mention_their_role(tmp_path):
+    """A boss name typed by a user must not be able to ping @everyone or other roles."""
+    cfg = GuildConfig(1, 10, 3, "KR", 10)
+    bot, chans = bot_with(tmp_path, cfg)
+    now = datetime.now(timezone.utc)
+    bot.storage.set_field_timer(1, "@everyone <@&777>", "", int((now + timedelta(minutes=5)).timestamp()))
+    tick(bot, now)
+    am = chans[10].sent[0][1]["allowed_mentions"]
+    assert am.everyone is False and am.users is False
+    assert [r.id for r in am.roles] == [3]
+
+
+def test_same_boss_in_two_zones_keeps_both(tmp_path):
+    s = Storage(str(tmp_path / "z.db"))
+    s.set_field_timer(1, "Silent Dartan", "Altgard", 100)
+    s.set_field_timer(1, "Silent Dartan", "Verteron", 200)
+    s.set_field_timer(1, "silent dartan", "ALTGARD", 300)  # same boss and zone, other case: replaces
+    assert sorted(s.field_timers(1)) == [("Silent Dartan", "Altgard", 300), ("Silent Dartan", "Verteron", 200)]
+    assert s.remove_field_timer(1, "Silent Dartan", "verteron")
+    assert s.field_timers(1) == [("Silent Dartan", "Altgard", 300)]
+
+
+def test_old_field_timer_table_is_migrated(tmp_path):
+    import sqlite3
+
+    path = str(tmp_path / "old.db")
+    db = sqlite3.connect(path)
+    db.execute("CREATE TABLE field_timers (guild_id INTEGER NOT NULL, boss TEXT NOT NULL, "
+               "zone TEXT NOT NULL DEFAULT '', spawn_at INTEGER NOT NULL, PRIMARY KEY (guild_id, boss))")
+    db.execute("INSERT INTO field_timers VALUES (1, 'Silent Dartan', 'Altgard', 100)")
+    db.commit()
+    db.close()
+    s = Storage(path)
+    s.set_field_timer(1, "Silent Dartan", "Verteron", 200)
+    assert len(s.field_timers(1)) == 2
+
+
+def test_role_buttons_only_toggle_ping_roles(tmp_path):
+    from bot import views
+
+    replies = []
+
+    async def send_message(text, **kw):
+        replies.append(text)
+
+    inter = types.SimpleNamespace(guild=object(), response=types.SimpleNamespace(send_message=send_message))
+    asyncio.run(views.toggle_role(inter, 555, allowed={3}))
+    assert "out of date" in replies[0]
+
+
+def test_clean_name():
+    assert fieldboss.clean_name("  Silent   Dartan | x ") == "Silent Dartan / x"
+    assert len(fieldboss.clean_name("x" * 100)) == fieldboss.NAME_LIMIT

@@ -63,6 +63,14 @@ SCHEMA = {
 }
 
 
+NAME_LIMIT = 40  # boss and zone both fit in a 100-character button id
+
+
+def clean_name(text: str) -> str:
+    """Trim a boss or zone name to something safe to store and put in a button id."""
+    return re.sub(r"\s+", " ", (text or "").replace("|", "/")).strip()[:NAME_LIMIT]
+
+
 @dataclass
 class FieldTimer:
     boss: str
@@ -94,7 +102,7 @@ def to_timers(items: list[dict], region: str, taken_at: datetime) -> list[FieldT
     """Turn the model's list into timers. Countdowns count from when the screenshot was posted."""
     timers = []
     for item in items:
-        boss = (item.get("boss") or "").strip()
+        boss = clean_name(item.get("boss") or "")
         if not boss:
             continue
         seconds = item.get("countdown_seconds")
@@ -103,7 +111,7 @@ def to_timers(items: list[dict], region: str, taken_at: datetime) -> list[FieldT
         else:
             spawn = _clock_to_utc(item.get("clock_time") or "", region, taken_at)
         if spawn is not None:
-            timers.append(FieldTimer(boss[:80], (item.get("zone") or "").strip()[:80], spawn))
+            timers.append(FieldTimer(boss, clean_name(item.get("zone") or ""), spawn))
     return timers
 
 

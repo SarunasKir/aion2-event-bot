@@ -26,14 +26,19 @@ def role_menu_view(roles: list[discord.Role]) -> discord.ui.View:
     return view
 
 
-def killed_view(boss: str) -> discord.ui.View:
+def killed_view(boss: str, zone: str) -> discord.ui.View:
     """A "Killed" button under a field boss ping, to start its next respawn timer."""
-    view = discord.ui.View(timeout=1)  # handled by handle_component, not by this object
+    view = discord.ui.View(timeout=1)  # clicks are handled by EventBot.on_interaction, not this object
     view.add_item(discord.ui.Button(
         label="Killed: start respawn timer", emoji="✅", style=discord.ButtonStyle.success,
-        custom_id=f"{KILLED_PREFIX}{boss[:80]}",
+        custom_id=f"{KILLED_PREFIX}{boss}|{zone}",
     ))
     return view
+
+
+def parse_killed(custom_id: str) -> tuple[str, str]:
+    boss, _, zone = custom_id[len(KILLED_PREFIX):].partition("|")
+    return boss, zone
 
 
 class RespawnModal(discord.ui.Modal, title="Field boss killed"):
@@ -49,8 +54,12 @@ class RespawnModal(discord.ui.Modal, title="Field boss killed"):
         await self._on_submit(interaction, str(self.respawn.value))
 
 
-async def toggle_role(interaction: discord.Interaction, role_id: int) -> None:
+async def toggle_role(interaction: discord.Interaction, role_id: int, allowed: set[int]) -> None:
+    """Add or remove a ping role. Only roles the bot is set up to ping can be toggled."""
     guild = interaction.guild
+    if role_id not in allowed:
+        await interaction.response.send_message("That button is out of date. Ask an admin to run /role-menu again.", ephemeral=True)
+        return
     role = guild.get_role(role_id) if guild else None
     member = interaction.user
     if role is None or not isinstance(member, discord.Member):
