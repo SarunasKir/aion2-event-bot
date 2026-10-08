@@ -1,7 +1,9 @@
-"""Aion 2 event schedule, mirrored from https://aion2hub.com/tools/event-timer.
+"""Aion 2 event and world boss schedule, mirrored from aion2hub.com.
 
-The site has no public API: the timer page computes countdowns in the browser
-from a fixed weekly schedule. This module holds that same schedule as data.
+Events come from https://aion2hub.com/tools/event-timer and bosses from
+https://aion2hub.com/tools/world-bosses. The site has no public API: its
+timers compute countdowns in the browser from a fixed weekly schedule. This
+module holds that same schedule as data.
 When the game changes its timetable, edit EVENTS below.
 
 All times are *server* time for the region. Weekdays use Python's numbering
@@ -42,6 +44,7 @@ class Event:
     name: str
     description: str
     rules: dict[str, tuple[Rule, ...]] = field(default_factory=dict)
+    category: str = "event"  # "event" or "boss"
 
     def regions(self) -> list[str]:
         return list(self.rules)
@@ -52,6 +55,15 @@ def _hours(*hours: int, minute: int = 0) -> tuple[tuple[int, int], ...]:
 
 
 _EVERY_HOUR_HALF_PAST = _hours(*range(24), minute=30)
+_KR_TW = ("KR", "TW")
+
+
+def _boss(key: str, name: str, location: str, **rules: tuple[Rule, ...]) -> Event:
+    return Event(key=key, name=name, description=location, rules=rules, category="boss")
+
+
+def _same(rule: Rule, regions=_KR_TW) -> dict[str, tuple[Rule, ...]]:
+    return {r: (rule,) for r in regions}
 
 EVENTS: dict[str, Event] = {
     e.key: e
@@ -111,6 +123,42 @@ EVENTS: dict[str, Event] = {
                 "GLOBAL": (Rule(_hours(16), frozenset({WED})),),
             },
         ),
+        # World bosses (https://aion2hub.com/tools/world-bosses).
+        _boss(
+            "watcher_kaira", "Watcher Kaira", "Chaotic Lower Reshanta",
+            KR=(Rule(_hours(1, 5, 9, 13, 17, 21)),),
+            TW=(Rule(_hours(1, 5, 9, 13, 17, 21)),),
+            GLOBAL=(Rule(_hours(1, 4, 7, 10, 13, 16, 19, 22)),),
+        ),
+        *[
+            _boss(
+                key, name, "Chaotic Lower Reshanta",
+                **_same(Rule(_hours(22, minute=30), frozenset({WED, SAT}))),
+                GLOBAL=(Rule(_hours(21, minute=30), frozenset({MON, THU, SAT})),),
+            )
+            for key, name in [
+                ("executor_argo", "Executor Argo"),
+                ("executor_kaira", "Executor Kaira"),
+                ("executor_tamasa", "Executor Tamasa"),
+            ]
+        ],
+        _boss(
+            "abyss_siege_boss", "Abyss Siege Boss", "Abyss",
+            **_same(Rule(_hours(22), frozenset({FRI, SUN}))),
+            GLOBAL=(Rule(_hours(21), frozenset({FRI, SUN})),),
+        ),
+        _boss(
+            "lord_nahma", "Enraged Guardian Lord Nahma", "Chaotic Middle Reshanta",
+            **_same(Rule(_hours(22), frozenset({FRI, SUN}))),
+        ),
+        *[
+            _boss(key, name, "Chaotic Middle Reshanta", **_same(Rule(_hours(22, minute=30), frozenset({WED, SAT}))))
+            for key, name in [
+                ("executioner_dramos", "Executioner Dramos"),
+                ("ravager_marakha", "Ravager Marakha"),
+                ("turncoat_ducal", "Turncoat Ducal"),
+            ]
+        ],
     ]
 }
 

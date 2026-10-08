@@ -1,13 +1,14 @@
 # Aion 2 Event Bot
 
-A Discord bot that pings a role before Aion 2 events start. It uses the schedule from
-[aion2hub.com/tools/event-timer](https://aion2hub.com/tools/event-timer).
+A Discord bot that pings a role before the Aion 2 events and world bosses you pick. It uses the schedules from
+[aion2hub's event timer](https://aion2hub.com/tools/event-timer) and [world boss timers](https://aion2hub.com/tools/world-bosses).
+Only followed events and bosses are pinged.
 
 Server admins pick:
 - the **channel** for announcements
 - the **role** to ping
 - the **region** (Korea, Taiwan or Global) so times match their servers
-- which **events** to follow
+- which **events and bosses** to follow
 - how early to ping (default **10 minutes**; 0 pings at start)
 
 Example announcement:
@@ -25,6 +26,19 @@ Example announcement:
 | Daily Reset | 05:00 | 16:00 |
 | Weekly Reset | Wed 05:00 | Wed 16:00 |
 
+## World bosses
+
+| Boss | Where | Korea / Taiwan | Global |
+|---|---|---|---|
+| Watcher Kaira | Chaotic Lower Reshanta | every 4h from 01:00 | every 3h from 01:00 |
+| Executor Argo, Kaira, Tamasa | Chaotic Lower Reshanta | Wed and Sat 22:30 | Mon, Thu and Sat 21:30 |
+| Abyss Siege Boss | Abyss | Fri and Sun 22:00 | Fri and Sun 21:00 |
+| Enraged Guardian Lord Nahma | Chaotic Middle Reshanta | Fri and Sun 22:00 | not in Global yet |
+| Executioner Dramos, Ravager Marakha, Turncoat Ducal | Chaotic Middle Reshanta | Wed and Sat 22:30 | not in Global yet |
+
+Bosses that spawn together are announced in one message. Zone field bosses (Altgard, Verteron, Eltnen, Morheim)
+are left out, because aion2hub lists no spawn times for them.
+
 All times are server time: Korea is GMT+9, Taiwan is GMT+8, and Global is GMT+9 (as aion2hub lists it).
 Discord shows each ping time in every reader's own timezone.
 
@@ -38,9 +52,9 @@ aren't included, because aion2hub doesn't publish their start minutes. You can a
 | Command | Who | What it does |
 |---|---|---|
 | `/setup channel role [region] [lead_minutes]` | Manage Server | Sets where and whom to ping |
-| `/follow event` | Manage Server | Starts announcing an event, or "All events" |
-| `/unfollow event` | Manage Server | Stops announcing an event |
-| `/events` | Everyone | Shows settings and when each event is next |
+| `/follow event` | Manage Server | Starts pinging an event or boss, or "All bosses", "All events" or "Everything" |
+| `/unfollow event` | Manage Server | Stops pinging an event or boss |
+| `/events` | Everyone | Shows settings, what's followed, and when each event or boss is next |
 | `/test-ping` | Manage Server | Posts a sample ping in the configured channel |
 
 ## Setup

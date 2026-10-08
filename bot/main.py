@@ -16,7 +16,14 @@ from .storage import GuildConfig, Storage
 
 log = logging.getLogger("aion2bot")
 
-EVENT_CHOICES = [app_commands.Choice(name=e.name, value=e.key) for e in EVENTS.values()]
+EVENT_CHOICES = [
+    app_commands.Choice(name=("Boss: " if e.category == "boss" else "") + e.name, value=e.key)
+    for e in EVENTS.values()
+] + [
+    app_commands.Choice(name="All bosses", value="*boss"),
+    app_commands.Choice(name="All events", value="*event"),
+    app_commands.Choice(name="Everything", value="*"),
+]
 REGION_CHOICES = [app_commands.Choice(name=label, value=key) for key, label in REGION_LABELS.items()]
 DEFAULT_LEAD = int(os.getenv("DEFAULT_LEAD_MINUTES", "10"))
 
@@ -42,16 +49,18 @@ class EventBot(discord.Client):
             channel = self.get_channel(cfg.channel_id)
             if channel is None:
                 continue
+            by_start: dict[datetime, list] = {}
             for event, start in due(cfg, self.storage.followed(cfg.guild_id), now):
-                if not self.storage.mark_sent(cfg.guild_id, event.key, int(start.timestamp())):
-                    continue
+                if self.storage.mark_sent(cfg.guild_id, event.key, int(start.timestamp())):
+                    by_start.setdefault(start, []).append(event)
+            for start, events in by_start.items():
                 try:
                     await channel.send(
-                        format_ping(event, start, cfg.role_id),
+                        format_ping(events, start, cfg.role_id),
                         allowed_mentions=discord.AllowedMentions(roles=True),
                     )
                 except discord.HTTPException:
-                    log.exception("Could not post %s in guild %s", event.key, cfg.guild_id)
+                    log.exception("Could not post %s in guild %s", [e.key for e in events], cfg.guild_id)
         self.storage.prune_sent(int((now - timedelta(days=2)).timestamp()))
 
     @check_events.before_loop
@@ -61,6 +70,14 @@ class EventBot(discord.Client):
 
 def _config(bot: EventBot, guild_id: int) -> GuildConfig:
     return bot.storage.get_config(guild_id) or GuildConfig(guild_id, None, None, "GLOBAL", DEFAULT_LEAD)
+
+
+def _expand(choice: str) -> list[str]:
+    if choice == "*":
+        return list(EVENTS)
+    if choice.startswith("*"):
+        return [k for k, e in EVENTS.items() if e.category == choice[1:]]
+    return [choice]
 
 
 def _status_text(bot: EventBot, guild_id: int) -> str:
@@ -74,14 +91,18 @@ def _status_text(bot: EventBot, guild_id: int) -> str:
         f"**Server region:** {REGION_LABELS[cfg.region]}",
         f"**Ping:** {cfg.lead_minutes} min before start",
         "",
-        "**Events** (✅ followed):",
     ]
     followed = set(bot.storage.followed(guild_id))
-    for event in EVENTS.values():
-        mark = "✅" if event.key in followed else "▫️"
-        nxt = next_occurrence(event, cfg.region, now)
-        when = f"next <t:{int(nxt.timestamp())}:R>" if nxt else "not in this region"
-        lines.append(f"{mark} {event.name}: {when}")
+    for category, title in [("event", "Events"), ("boss", "World bosses")]:
+        lines.append(f"**{title}** (✅ = pinged):")
+        for event in EVENTS.values():
+            if event.category != category:
+                continue
+            mark = "✅" if event.key in followed else "▫️"
+            nxt = next_occurrence(event, cfg.region, now)
+            when = f"next <t:{int(nxt.timestamp())}:R>" if nxt else "not in this region"
+            lines.append(f"{mark} {event.name}: {when}")
+        lines.append("")
     return "\n".join(lines)
 
 
@@ -128,9 +149,9 @@ def register_commands(bot: EventBot) -> None:
     @bot.tree.command(description="Start announcing an event.")
     @admin
     @app_commands.guild_only()
-    @app_commands.choices(event=EVENT_CHOICES + [app_commands.Choice(name="All events", value="*")])
+    @app_commands.choices(event=EVENT_CHOICES)
     async def follow(interaction: discord.Interaction, event: app_commands.Choice[str]) -> None:
-        keys = list(EVENTS) if event.value == "*" else [event.value]
+        keys = _expand(event.value)
         for key in keys:
             bot.storage.follow(interaction.guild_id, key)
         await interaction.response.send_message(
@@ -140,9 +161,9 @@ def register_commands(bot: EventBot) -> None:
     @bot.tree.command(description="Stop announcing an event.")
     @admin
     @app_commands.guild_only()
-    @app_commands.choices(event=EVENT_CHOICES + [app_commands.Choice(name="All events", value="*")])
+    @app_commands.choices(event=EVENT_CHOICES)
     async def unfollow(interaction: discord.Interaction, event: app_commands.Choice[str]) -> None:
-        keys = list(EVENTS) if event.value == "*" else [event.value]
+        keys = _expand(event.value)
         for key in keys:
             bot.storage.unfollow(interaction.guild_id, key)
         await interaction.response.send_message(
@@ -166,7 +187,7 @@ def register_commands(bot: EventBot) -> None:
         event = EVENTS["spacetime_rift"]
         start = datetime.now(timezone.utc) + timedelta(minutes=cfg.lead_minutes)
         await channel.send(
-            "🧪 Test announcement\n" + format_ping(event, start, cfg.role_id),
+            "🧪 Test announcement\n" + format_ping([event], start, cfg.role_id),
             allowed_mentions=discord.AllowedMentions(roles=True),
         )
         await interaction.response.send_message(f"Sent a test to {channel.mention}.", ephemeral=True)

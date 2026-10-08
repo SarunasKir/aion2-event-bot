@@ -62,3 +62,34 @@ def test_storage_dedupes_pings(tmp_path):
     s.follow(1, "beritra_air_raid")
     s.follow(1, "beritra_air_raid")
     assert s.followed(1) == ["beritra_air_raid"]
+
+
+def test_executors_share_one_ping_on_kr():
+    from bot.announcer import format_ping
+
+    cfg = GuildConfig(1, 10, 20, "KR", 10)
+    # 2026-10-07 is a Wednesday; Executors spawn 22:30 KST.
+    spawn = kst(2026, 10, 7, 22, 30)
+    hits = due(cfg, ["executor_argo", "executor_kaira", "spacetime_rift"], spawn - timedelta(minutes=10))
+    assert {e.key for e, _ in hits} == {"executor_argo", "executor_kaira"}
+    msg = format_ping([e for e, _ in hits], spawn, 20)
+    assert msg.startswith("<@&20> **Executor Argo**, **Executor Kaira** spawn <t:")
+
+
+def test_watcher_kaira_interval_differs_by_region():
+    start = kst(2026, 10, 8, 0, 0)
+    kr = occurrences(EVENTS["watcher_kaira"], "KR", start, start + timedelta(days=1))
+    gl = occurrences(EVENTS["watcher_kaira"], "GLOBAL", start, start + timedelta(days=1))
+    assert len(kr) == 6 and len(gl) == 8
+
+
+def test_middle_reshanta_bosses_not_on_global():
+    assert next_occurrence(EVENTS["turncoat_ducal"], "GLOBAL", datetime.now(UTC)) is None
+    assert next_occurrence(EVENTS["turncoat_ducal"], "TW", datetime.now(UTC)) is not None
+
+
+def test_unfollowed_bosses_are_not_pinged():
+    cfg = GuildConfig(1, 10, 20, "GLOBAL", 10)
+    siege = datetime(2026, 10, 9, 21, 0, tzinfo=REGIONS["GLOBAL"])  # Friday
+    assert due(cfg, ["daily_reset", "executor_argo"], siege - timedelta(minutes=10)) == []
+    assert [e.key for e, _ in due(cfg, ["abyss_siege_boss"], siege - timedelta(minutes=10))] == ["abyss_siege_boss"]

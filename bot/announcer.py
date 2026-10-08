@@ -29,10 +29,13 @@ def due(cfg: GuildConfig, followed: list[str], now: datetime) -> list[tuple[Even
     return result
 
 
-def format_ping(event: Event, start: datetime, role_id: int | None) -> str:
+def format_ping(events: list[Event], start: datetime, role_id: int | None) -> str:
+    """One message for everything starting at `start`, e.g. three Executors at 22:30."""
     ts = int(start.timestamp())
     mention = f"<@&{role_id}> " if role_id else ""
-    return (
-        f"{mention}**{event.name}** starts <t:{ts}:R> (<t:{ts}:t>).\n"
-        f"-# {event.description}"
-    )
+    names = ", ".join(f"**{e.name}**" for e in events)
+    verb = "spawns" if all(e.category == "boss" for e in events) else "starts"
+    if len(events) > 1:
+        verb = verb[:-1]
+    details = sorted({("📍 " if e.category == "boss" else "") + e.description for e in events})
+    return f"{mention}{names} {verb} <t:{ts}:R> (<t:{ts}:t>).\n" + "\n".join(f"-# {d}" for d in details)
