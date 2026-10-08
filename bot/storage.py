@@ -12,7 +12,12 @@ CREATE TABLE IF NOT EXISTS guild_config (
     role_id      INTEGER,
     region       TEXT    NOT NULL DEFAULT 'GLOBAL',
     lead_minutes INTEGER NOT NULL DEFAULT 10,
-    time_display TEXT    NOT NULL DEFAULT 'both'
+    time_display TEXT    NOT NULL DEFAULT 'both',
+    quiet_start  TEXT,
+    quiet_end    TEXT,
+    start_ping   INTEGER NOT NULL DEFAULT 0,
+    digest       INTEGER NOT NULL DEFAULT 0,
+    delete_after INTEGER
 );
 CREATE TABLE IF NOT EXISTS subscriptions (
     guild_id  INTEGER NOT NULL,
@@ -32,6 +37,25 @@ CREATE TABLE IF NOT EXISTS field_timers (
     spawn_at INTEGER NOT NULL,
     PRIMARY KEY (guild_id, boss)
 );
+CREATE TABLE IF NOT EXISTS routes (
+    guild_id   INTEGER NOT NULL,
+    category   TEXT    NOT NULL,
+    channel_id INTEGER,
+    role_id    INTEGER,
+    PRIMARY KEY (guild_id, category)
+);
+CREATE TABLE IF NOT EXISTS field_respawn (
+    guild_id INTEGER NOT NULL,
+    boss     TEXT    NOT NULL,
+    minutes  INTEGER NOT NULL,
+    PRIMARY KEY (guild_id, boss)
+);
+CREATE TABLE IF NOT EXISTS posted (
+    channel_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    delete_at  INTEGER NOT NULL,
+    PRIMARY KEY (channel_id, message_id)
+);
 CREATE TABLE IF NOT EXISTS meta (
     name  TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -45,6 +69,17 @@ CREATE TABLE IF NOT EXISTS sent (
 """
 
 
+_CONFIG_COLUMNS = {
+    "time_display": "TEXT NOT NULL DEFAULT 'both'",
+    "quiet_start": "TEXT",
+    "quiet_end": "TEXT",
+    "start_ping": "INTEGER NOT NULL DEFAULT 0",
+    "digest": "INTEGER NOT NULL DEFAULT 0",
+    "delete_after": "INTEGER",
+}
+_FIELDS = "guild_id, channel_id, role_id, region, lead_minutes, " + ", ".join(_CONFIG_COLUMNS)
+
+
 @dataclass
 class GuildConfig:
     guild_id: int
@@ -53,40 +88,47 @@ class GuildConfig:
     region: str
     lead_minutes: int
     time_display: str = "both"  # "local", "server" or "both"
+    quiet_start: str | None = None  # "HH:MM" server time, or None for no quiet hours
+    quiet_end: str | None = None
+    start_ping: bool = False  # also ping when the event starts
+    digest: bool = False  # post a daily summary after the daily reset
+    delete_after: int | None = None  # minutes after the start to delete pings
+
+
+def _config(row) -> GuildConfig:
+    cfg = GuildConfig(*row)
+    cfg.start_ping, cfg.digest = bool(cfg.start_ping), bool(cfg.digest)
+    return cfg
 
 
 class Storage:
     def __init__(self, path: str):
         self.db = sqlite3.connect(path)
         self.db.executescript(SCHEMA)
+        # Add settings columns that databases from older versions don't have yet.
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(guild_config)")}
-        if "time_display" not in columns:  # databases created before this setting existed
-            self.db.execute("ALTER TABLE guild_config ADD COLUMN time_display TEXT NOT NULL DEFAULT 'both'")
+        for name, ddl in _CONFIG_COLUMNS.items():
+            if name not in columns:
+                self.db.execute(f"ALTER TABLE guild_config ADD COLUMN {name} {ddl}")
         self.db.commit()
 
     def get_config(self, guild_id: int) -> GuildConfig | None:
-        row = self.db.execute(
-            "SELECT guild_id, channel_id, role_id, region, lead_minutes, time_display "
-            "FROM guild_config WHERE guild_id = ?",
-            (guild_id,),
-        ).fetchone()
-        return GuildConfig(*row) if row else None
+        row = self.db.execute(f"SELECT {_FIELDS} FROM guild_config WHERE guild_id = ?", (guild_id,)).fetchone()
+        return _config(row) if row else None
 
     def all_configs(self) -> list[GuildConfig]:
-        rows = self.db.execute(
-            "SELECT guild_id, channel_id, role_id, region, lead_minutes, time_display FROM guild_config "
-            "WHERE channel_id IS NOT NULL"
-        ).fetchall()
-        return [GuildConfig(*r) for r in rows]
+        rows = self.db.execute(f"SELECT {_FIELDS} FROM guild_config WHERE channel_id IS NOT NULL").fetchall()
+        return [_config(r) for r in rows]
 
     def save_config(self, cfg: GuildConfig) -> None:
+        names = _FIELDS.split(", ")
+        values = [getattr(cfg, n) for n in names]
+        values = [int(v) if isinstance(v, bool) else v for v in values]
+        updates = ", ".join(f"{n} = excluded.{n}" for n in names[1:])
         self.db.execute(
-            "INSERT INTO guild_config (guild_id, channel_id, role_id, region, lead_minutes, time_display) "
-            "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(guild_id) DO UPDATE SET "
-            "channel_id = excluded.channel_id, role_id = excluded.role_id, "
-            "region = excluded.region, lead_minutes = excluded.lead_minutes, "
-            "time_display = excluded.time_display",
-            (cfg.guild_id, cfg.channel_id, cfg.role_id, cfg.region, cfg.lead_minutes, cfg.time_display),
+            f"INSERT INTO guild_config ({_FIELDS}) VALUES ({', '.join('?' * len(names))}) "
+            f"ON CONFLICT(guild_id) DO UPDATE SET {updates}",
+            values,
         )
         self.db.commit()
 
@@ -158,6 +200,61 @@ class Storage:
 
     def prune_field_timers(self, before_ts: int) -> None:
         self.db.execute("DELETE FROM field_timers WHERE spawn_at < ?", (before_ts,))
+        self.db.commit()
+
+    def route(self, guild_id: int, category: str) -> tuple[int | None, int | None]:
+        """(channel_id, role_id) set for a category, or (None, None) to use the server defaults."""
+        row = self.db.execute(
+            "SELECT channel_id, role_id FROM routes WHERE guild_id = ? AND category = ?", (guild_id, category)
+        ).fetchone()
+        return (row[0], row[1]) if row else (None, None)
+
+    def routes(self, guild_id: int) -> dict[str, tuple[int | None, int | None]]:
+        rows = self.db.execute(
+            "SELECT category, channel_id, role_id FROM routes WHERE guild_id = ?", (guild_id,)
+        ).fetchall()
+        return {c: (ch, r) for c, ch, r in rows}
+
+    def set_route(self, guild_id: int, category: str, channel_id: int | None, role_id: int | None) -> None:
+        if channel_id is None and role_id is None:
+            self.db.execute("DELETE FROM routes WHERE guild_id = ? AND category = ?", (guild_id, category))
+        else:
+            self.db.execute(
+                "INSERT INTO routes (guild_id, category, channel_id, role_id) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(guild_id, category) DO UPDATE SET "
+                "channel_id = excluded.channel_id, role_id = excluded.role_id",
+                (guild_id, category, channel_id, role_id),
+            )
+        self.db.commit()
+
+    def respawn_minutes(self, guild_id: int, boss: str) -> int | None:
+        row = self.db.execute(
+            "SELECT minutes FROM field_respawn WHERE guild_id = ? AND boss = lower(?)", (guild_id, boss)
+        ).fetchone()
+        return row[0] if row else None
+
+    def set_respawn_minutes(self, guild_id: int, boss: str, minutes: int) -> None:
+        self.db.execute(
+            "INSERT INTO field_respawn (guild_id, boss, minutes) VALUES (?, lower(?), ?) "
+            "ON CONFLICT(guild_id, boss) DO UPDATE SET minutes = excluded.minutes",
+            (guild_id, boss, minutes),
+        )
+        self.db.commit()
+
+    def add_posted(self, channel_id: int, message_id: int, delete_at: int) -> None:
+        self.db.execute(
+            "INSERT OR REPLACE INTO posted (channel_id, message_id, delete_at) VALUES (?, ?, ?)",
+            (channel_id, message_id, delete_at),
+        )
+        self.db.commit()
+
+    def posted_due(self, now_ts: int) -> list[tuple[int, int]]:
+        return self.db.execute(
+            "SELECT channel_id, message_id FROM posted WHERE delete_at <= ?", (now_ts,)
+        ).fetchall()
+
+    def remove_posted(self, channel_id: int, message_id: int) -> None:
+        self.db.execute("DELETE FROM posted WHERE channel_id = ? AND message_id = ?", (channel_id, message_id))
         self.db.commit()
 
     def get_meta(self, name: str) -> str | None:

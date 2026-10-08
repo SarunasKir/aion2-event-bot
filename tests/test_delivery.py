@@ -25,6 +25,7 @@ class FakeChannel:
     def __init__(self, can_send=True, fail=None):
         self.sent, self.can_send, self.fail = [], can_send, fail
         self.mention = "#alerts"
+        self.id = 10
 
     def permissions_for(self, member):
         return types.SimpleNamespace(send_messages=self.can_send)
@@ -88,7 +89,7 @@ def test_missing_permission_warns_owner_once_then_recovers(tmp_path):
     ch.can_send = True
     run(bot)
     assert len(ch.sent) == 1  # the ping wasn't lost while blocked
-    assert bot.storage.get_meta("warned:1") == ""
+    assert bot.storage.get_meta("warned:1:no_permission:10") == ""
 
 
 def test_forbidden_send_warns_and_keeps_ping(tmp_path):

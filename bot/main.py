@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 
 import aiohttp
@@ -12,10 +13,23 @@ import discord
 from discord import app_commands
 from discord.ext import tasks
 
-from .announcer import FIELD_LEAD_KEY, TIME_DISPLAYS, due, due_field, format_field_ping, format_ping, format_time
+from .announcer import (
+    FIELD_LEAD_KEY,
+    TIME_DISPLAYS,
+    due,
+    due_field,
+    format_digest,
+    format_field_ping,
+    format_ping,
+    format_start_ping,
+    format_time,
+    in_quiet_hours,
+    next_reset,
+    parse_clock,
+)
 from .schedule import EVENTS, REGION_LABELS, REGIONS, next_occurrence
 from .storage import GuildConfig, Storage
-from . import fieldboss, watcher
+from . import fieldboss, health, views, watcher
 
 log = logging.getLogger("aion2bot")
 
@@ -28,6 +42,12 @@ EVENT_CHOICES = [
     app_commands.Choice(name="Everything", value="*"),
 ]
 PING_TIME_CHOICES = EVENT_CHOICES + [app_commands.Choice(name="Field bosses (timers you add)", value=FIELD_LEAD_KEY)]
+CATEGORY_CHOICES = [
+    app_commands.Choice(name="Events", value="event"),
+    app_commands.Choice(name="World bosses", value="boss"),
+    app_commands.Choice(name="Field bosses", value="field"),
+]
+CATEGORY_LABELS = {c.value: c.name for c in CATEGORY_CHOICES}
 TIME_DISPLAY_CHOICES = [app_commands.Choice(name=label, value=key) for key, label in TIME_DISPLAYS.items()]
 REGION_CHOICES = [app_commands.Choice(name=label, value=key) for key, label in REGION_LABELS.items()]
 DEFAULT_LEAD = int(os.getenv("DEFAULT_LEAD_MINUTES", "10"))
@@ -48,6 +68,7 @@ class EventBot(discord.Client):
         register_commands(self)
         await self.tree.sync()
         self.check_events.start()
+        health.start_watchdog()
         if AUTO_UPDATE:
             self.refresh_schedule.start()
 
@@ -98,84 +119,189 @@ class EventBot(discord.Client):
     async def before_refresh(self) -> None:
         await self.wait_until_ready()
 
+    async def on_interaction(self, interaction: discord.Interaction) -> None:
+        """Buttons that must keep working after a restart: role menu and field boss Killed."""
+        if interaction.type != discord.InteractionType.component:
+            return
+        custom_id = (interaction.data or {}).get("custom_id", "")
+        if custom_id.startswith(views.ROLE_PREFIX):
+            await views.toggle_role(interaction, int(custom_id[len(views.ROLE_PREFIX):]))
+        elif custom_id.startswith(views.KILLED_PREFIX) and interaction.guild_id:
+            await self._boss_killed(interaction, custom_id[len(views.KILLED_PREFIX):])
+
+    async def _boss_killed(self, interaction: discord.Interaction, boss: str) -> None:
+        gid = interaction.guild_id
+        known = self.storage.respawn_minutes(gid, boss)
+
+        async def start_timer(inter: discord.Interaction, minutes: int) -> None:
+            cfg = _config(self, gid)
+            spawn = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+            zone = next((z for b, z, _ in self.storage.field_timers(gid) if b.lower() == boss.lower()), "")
+            self.storage.set_field_timer(gid, boss, zone, int(spawn.timestamp()))
+            await inter.response.send_message(
+                f"✅ **{boss}** killed by {inter.user.mention}. Next spawn <t:{int(spawn.timestamp())}:R>, "
+                f"{format_time(spawn, cfg.region, cfg.time_display)}.",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+
+        if known:
+            await start_timer(interaction, known)
+            return
+
+        async def submitted(inter: discord.Interaction, text: str) -> None:
+            minutes = fieldboss.parse_duration_minutes(text)
+            if minutes is None:
+                await inter.response.send_message("I couldn't read that. Try `2h` or `1h 30m`.", ephemeral=True)
+                return
+            self.storage.set_respawn_minutes(gid, boss, minutes)
+            await start_timer(inter, minutes)
+
+        await interaction.response.send_modal(views.RespawnModal(boss, submitted))
+
     async def on_ready(self) -> None:
         log.info("Logged in as %s in %d server(s)", self.user, len(self.guilds))
 
     @tasks.loop(seconds=20)
     async def check_events(self) -> None:
         now = datetime.now(timezone.utc)
+        health.beat()
         for cfg in self.storage.all_configs():
             try:
                 await self._check_guild(cfg, now)
             except Exception:
                 log.exception("Check failed for guild %s", cfg.guild_id)
+        await self._delete_old_pings(now)
         self.storage.prune_field_timers(int((now - timedelta(hours=1)).timestamp()))
         self.storage.prune_sent(int((now - timedelta(days=2)).timestamp()))
+
+    def _target(self, cfg: GuildConfig, category: str) -> tuple[int | None, int | None]:
+        """(channel_id, role_id) for a category: its own route if set, else the server defaults."""
+        channel_id, role_id = self.storage.route(cfg.guild_id, category)
+        return channel_id or cfg.channel_id, role_id or cfg.role_id
+
+    def _messages(self, cfg: GuildConfig, now: datetime) -> list[Outgoing]:
+        """Everything that should be posted for this server right now."""
+        gid = cfg.guild_id
+        overrides = self.storage.lead_overrides(gid)
+        followed = self.storage.followed(gid)
+        out: list[Outgoing] = []
+
+        def add(keys, category, start, text_for_role, view=None):
+            pending = [k for k in keys if not self.storage.was_sent(gid, *k)]
+            if not pending:
+                return
+            if in_quiet_hours(cfg, start):
+                for k in pending:  # skipped, not delayed: mark so it isn't posted late
+                    self.storage.mark_sent(gid, *k)
+                return
+            channel_id, role_id = self._target(cfg, category)
+            delete_at = int(start.timestamp()) + cfg.delete_after * 60 if cfg.delete_after is not None else None
+            out.append(Outgoing(pending, channel_id, text_for_role(role_id), view, delete_at))
+
+        # Advance pings, one message per start time and category
+        groups: dict[tuple[datetime, str], list] = {}
+        for event, start in due(cfg, followed, now, overrides):
+            groups.setdefault((start, event.category), []).append(event)
+        for (start, category), events in groups.items():
+            keys = [(e.key, int(start.timestamp())) for e in events]
+            add(keys, category, start, lambda r, ev=events, st=start: format_ping(ev, st, cfg, r))
+
+        field = due_field(cfg, self.storage.field_timers(gid), now, overrides)
+        for boss, zone, start in field:
+            add([(f"field:{boss.lower()}", int(start.timestamp()))], "field", start,
+                lambda r, b=boss, z=zone, st=start: format_field_ping(b, z, st, cfg, r), views.killed_view(boss))
+
+        if cfg.start_ping:
+            starting = replace(cfg, lead_minutes=0)
+            groups = {}
+            for event, start in due(starting, followed, now, {}):
+                groups.setdefault((start, event.category), []).append(event)
+            for (start, category), events in groups.items():
+                keys = [(f"start:{e.key}", int(start.timestamp())) for e in events]
+                add(keys, category, start, lambda r, ev=events: format_start_ping([e.name for e in ev], cfg, r))
+            for boss, zone, start in due_field(starting, self.storage.field_timers(gid), now, {FIELD_LEAD_KEY: 0}):
+                add([(f"start:field:{boss.lower()}", int(start.timestamp()))], "field", start,
+                    lambda r, b=boss: format_start_ping([b], cfg, r), views.killed_view(boss))
+
+        if cfg.digest:
+            reset = next_reset(cfg, now - timedelta(minutes=10))
+            if reset is not None and reset <= now:
+                key = ("digest", int(reset.timestamp()))
+                if not self.storage.was_sent(gid, *key):
+                    text = format_digest(cfg, followed, self.storage.field_timers(gid), now)
+                    out.append(Outgoing([key], cfg.channel_id, text, None, None, mention=False))
+        return out
 
     async def _check_guild(self, cfg: GuildConfig, now: datetime) -> None:
         guild = self.get_guild(cfg.guild_id)
         if guild is None:
             return  # the bot was removed from this server
-        overrides = self.storage.lead_overrides(cfg.guild_id)
-        # Each message: (list of (sent key, start timestamp), text)
-        messages: list[tuple[list[tuple[str, int]], str]] = []
-        by_start: dict[datetime, list] = {}
-        for event, start in due(cfg, self.storage.followed(cfg.guild_id), now, overrides):
-            if not self.storage.was_sent(cfg.guild_id, event.key, int(start.timestamp())):
-                by_start.setdefault(start, []).append(event)
-        for start, events in by_start.items():
-            keys = [(e.key, int(start.timestamp())) for e in events]
-            messages.append((keys, format_ping(events, start, cfg)))
-        for boss, zone, start in due_field(cfg, self.storage.field_timers(cfg.guild_id), now, overrides):
-            key = (f"field:{boss.lower()}", int(start.timestamp()))
-            if not self.storage.was_sent(cfg.guild_id, *key):
-                messages.append(([key], format_field_ping(boss, zone, start, cfg)))
+        messages = self._messages(cfg, now)
         if not messages:
             return
-
-        channel = guild.get_channel(cfg.channel_id)
-        if channel is None:
-            await self._warn_admins(
-                guild, "channel_missing",
-                f"I can't find the announcement channel I was set up with in **{guild.name}**, "
-                "so event pings aren't being posted. Run `/setup` to pick a channel.",
-            )
-            return
-        if not channel.permissions_for(guild.me).send_messages:
-            await self._warn_admins(
-                guild, "no_permission",
-                f"I don't have permission to send messages in {channel.mention} on **{guild.name}**, "
-                "so event pings aren't being posted. Give me View Channel and Send Messages there.",
-            )
-            return
-
-        for keys, text in messages:
+        for msg in messages:
+            channel = guild.get_channel(msg.channel_id)
+            if channel is None:
+                if msg.channel_id is None:
+                    continue
+                await self._warn_admins(
+                    guild, f"channel_missing:{msg.channel_id}",
+                    f"I can't find an announcement channel I was set up with in **{guild.name}**, "
+                    "so some pings aren't being posted. Run `/setup` or `/route` to pick a channel.",
+                )
+                continue
+            if not channel.permissions_for(guild.me).send_messages:
+                await self._warn_admins(
+                    guild, f"no_permission:{channel.id}",
+                    f"I don't have permission to send messages in {channel.mention} on **{guild.name}**, "
+                    "so pings there aren't being posted. Give me View Channel and Send Messages there.",
+                )
+                continue
             # Mark first so a slow send can't be posted twice by the next check;
             # undo the mark if the send fails, so the next check retries it.
-            for key, ts in keys:
+            for key, ts in msg.keys:
                 self.storage.mark_sent(cfg.guild_id, key, ts)
             try:
-                await channel.send(text, allowed_mentions=discord.AllowedMentions(roles=True))
+                kwargs = {"view": msg.view} if msg.view is not None else {}
+                posted = await channel.send(
+                    msg.text,
+                    allowed_mentions=discord.AllowedMentions(roles=True) if msg.mention else discord.AllowedMentions.none(),
+                    **kwargs,
+                )
             except discord.Forbidden:
-                for key, ts in keys:
+                for key, ts in msg.keys:
                     self.storage.unmark_sent(cfg.guild_id, key, ts)
                 await self._warn_admins(
-                    guild, "no_permission",
+                    guild, f"no_permission:{channel.id}",
                     f"Discord refused my message in {channel.mention} on **{guild.name}**, "
-                    "so event pings aren't being posted. Check my permissions in that channel.",
+                    "so pings there aren't being posted. Check my permissions in that channel.",
                 )
-                return
+                continue
             except discord.HTTPException as e:
-                for key, ts in keys:
+                for key, ts in msg.keys:
                     self.storage.unmark_sent(cfg.guild_id, key, ts)
-                log.warning("Ping in guild %s failed (%s); will retry: %s", cfg.guild_id, e.status, [k for k, _ in keys])
-                return
-        self._clear_warning(guild.id)
+                log.warning("Ping in guild %s failed (%s); will retry: %s", cfg.guild_id, e.status, [k for k, _ in msg.keys])
+                continue
+            if msg.delete_at is not None and posted is not None:
+                self.storage.add_posted(channel.id, posted.id, msg.delete_at)
+            self._clear_warning(guild.id, channel.id)
+
+    async def _delete_old_pings(self, now: datetime) -> None:
+        for channel_id, message_id in self.storage.posted_due(int(now.timestamp())):
+            channel = self.get_channel(channel_id)
+            if channel is not None:
+                try:
+                    await channel.get_partial_message(message_id).delete()
+                except discord.NotFound:
+                    pass
+                except discord.HTTPException:
+                    log.warning("Couldn't delete old ping %s in channel %s", message_id, channel_id)
+            self.storage.remove_posted(channel_id, message_id)
 
     async def _warn_admins(self, guild: discord.Guild, problem: str, text: str) -> None:
         """Tell the server's admins about a problem once, until it's fixed."""
-        meta_key = f"warned:{guild.id}"
-        if self.storage.get_meta(meta_key) == problem:
+        meta_key = f"warned:{guild.id}:{problem}"
+        if self.storage.get_meta(meta_key):
             return
         log.warning("Guild %s: %s", guild.id, problem)
         text = f"⚠️ **Aion 2 Event Bot:** {text}"
@@ -195,15 +321,27 @@ class EventBot(discord.Client):
             except discord.HTTPException:
                 log.warning("Couldn't warn the admins of guild %s", guild.id)
         if delivered:
-            self.storage.set_meta(meta_key, problem)
+            self.storage.set_meta(meta_key, "1")
 
-    def _clear_warning(self, guild_id: int) -> None:
-        if self.storage.get_meta(f"warned:{guild_id}"):
-            self.storage.set_meta(f"warned:{guild_id}", "")
+    def _clear_warning(self, guild_id: int, channel_id: int) -> None:
+        """A post in this channel worked, so warn again if it breaks later."""
+        for problem in (f"no_permission:{channel_id}", f"channel_missing:{channel_id}"):
+            if self.storage.get_meta(f"warned:{guild_id}:{problem}"):
+                self.storage.set_meta(f"warned:{guild_id}:{problem}", "")
 
     @check_events.before_loop
     async def before_check(self) -> None:
         await self.wait_until_ready()
+
+
+@dataclass
+class Outgoing:
+    keys: list[tuple[str, int]]  # (sent key, start timestamp) this message covers
+    channel_id: int | None
+    text: str
+    view: discord.ui.View | None
+    delete_at: int | None
+    mention: bool = True
 
 
 def _config(bot: EventBot, guild_id: int) -> GuildConfig:
@@ -222,6 +360,14 @@ def _minutes(lead: int) -> str:
     return "at start" if lead == 0 else f"{lead} min before"
 
 
+def _status_embed(bot: EventBot, guild_id: int) -> discord.Embed:
+    """Settings and upcoming times. An embed holds up to 4096 characters; a message only 2000."""
+    text = _status_text(bot, guild_id)
+    if len(text) > 4096:
+        text = text[:4000].rsplit("\n", 1)[0] + "\n…"
+    return discord.Embed(title="Aion 2 Event Bot", description=text, color=0x5865F2)
+
+
 def _status_text(bot: EventBot, guild_id: int) -> str:
     cfg = _config(bot, guild_id)
     now = datetime.now(timezone.utc)
@@ -233,8 +379,18 @@ def _status_text(bot: EventBot, guild_id: int) -> str:
         f"**Server region:** {REGION_LABELS[cfg.region]}",
         f"**Ping:** {_minutes(cfg.lead_minutes)} (change with /ping-time)",
         f"**Times shown as:** {TIME_DISPLAYS[cfg.time_display]} (change with /time-display)",
+        f"**Quiet hours:** {f'{cfg.quiet_start} to {cfg.quiet_end} server time' if cfg.quiet_start else 'off'} (/quiet-hours)",
+        f"**Ping at start too:** {'on' if cfg.start_ping else 'off'} (/start-ping)"
+        f" · **Daily summary:** {'on' if cfg.digest else 'off'} (/digest)"
+        f" · **Auto-delete:** {f'{cfg.delete_after} min after start' if cfg.delete_after is not None else 'off'} (/auto-delete)",
         "",
     ]
+    routes = [
+        f"**{CATEGORY_LABELS.get(c, c)} go to:** {f'<#{ch}>' if ch else 'the setup channel'}, "
+        f"pinging {f'<@&{r}>' if r else 'the setup role'} (/route)"
+        for c, (ch, r) in sorted(bot.storage.routes(guild_id).items())
+    ]
+    lines[2:2] = routes
     followed = set(bot.storage.followed(guild_id))
     overrides = bot.storage.lead_overrides(guild_id)
     for category, title in [("event", "Events"), ("boss", "World bosses")]:
@@ -301,7 +457,8 @@ def register_commands(bot: EventBot) -> None:
             warn += "\n⚠️ That role isn't mentionable, so pings won't notify anyone. " \
                     "Make it mentionable or give me *Mention @everyone, @here and All Roles*."
         await interaction.response.send_message(
-            "Saved. Now pick events with /follow.\n\n" + _status_text(bot, interaction.guild_id) + warn,
+            "Saved. Now pick events with /follow." + warn,
+            embed=_status_embed(bot, interaction.guild_id),
             ephemeral=True,
         )
 
@@ -314,7 +471,7 @@ def register_commands(bot: EventBot) -> None:
         for key in keys:
             bot.storage.follow(interaction.guild_id, key)
         await interaction.response.send_message(
-            f"Following **{event.name}**.\n\n" + _status_text(bot, interaction.guild_id), ephemeral=True
+            f"Following **{event.name}**.", embed=_status_embed(bot, interaction.guild_id), ephemeral=True
         )
 
     @bot.tree.command(description="Stop announcing an event.")
@@ -326,7 +483,7 @@ def register_commands(bot: EventBot) -> None:
         for key in keys:
             bot.storage.unfollow(interaction.guild_id, key)
         await interaction.response.send_message(
-            f"Stopped **{event.name}**.\n\n" + _status_text(bot, interaction.guild_id), ephemeral=True
+            f"Stopped **{event.name}**.", embed=_status_embed(bot, interaction.guild_id), ephemeral=True
         )
 
     @bot.tree.command(name="ping-time", description="Set how many minutes before the start to ping.")
@@ -359,9 +516,7 @@ def register_commands(bot: EventBot) -> None:
                 done = f"**{event.name}** now uses the server default."
             else:
                 done = f"**{event.name}** now pings **{_minutes(minutes)}**."
-        await interaction.response.send_message(
-            done + "\n\n" + _status_text(bot, interaction.guild_id), ephemeral=True
-        )
+        await interaction.response.send_message(done, embed=_status_embed(bot, interaction.guild_id), ephemeral=True)
 
     @bot.tree.command(name="time-display", description="Show times in pings as local time, server time, or both.")
     @admin
@@ -373,7 +528,8 @@ def register_commands(bot: EventBot) -> None:
         cfg.time_display = mode.value
         bot.storage.save_config(cfg)
         await interaction.response.send_message(
-            f"Pings now show **{mode.name.lower()}**.\n\n" + _status_text(bot, interaction.guild_id),
+            f"Pings now show **{mode.name.lower()}**.",
+            embed=_status_embed(bot, interaction.guild_id),
             ephemeral=True,
         )
 
@@ -426,14 +582,21 @@ def register_commands(bot: EventBot) -> None:
                 "I couldn't find any field boss timers in that screenshot. Try a tighter crop, or use /fieldboss add."
             )
             return
-        for t in timers:
-            bot.storage.set_field_timer(interaction.guild_id, t.boss, t.zone, int(t.spawn_at.timestamp()))
-        lead = bot.storage.lead_overrides(interaction.guild_id).get(FIELD_LEAD_KEY, cfg.lead_minutes)
-        await interaction.followup.send(
-            f"Added {len(timers)} field boss timer(s). I'll ping {_minutes(lead)} each spawn:\n"
+        gid = interaction.guild_id
+
+        def save() -> None:
+            for t in timers:
+                bot.storage.set_field_timer(gid, t.boss, t.zone, int(t.spawn_at.timestamp()))
+
+        lead = bot.storage.lead_overrides(gid).get(FIELD_LEAD_KEY, cfg.lead_minutes)
+        view = views.ConfirmTimers(interaction.user.id, timers, save)
+        view.message = await interaction.followup.send(
+            f"I read {len(timers)} field boss timer(s). Check them, then save, and I'll ping {_minutes(lead)} each spawn:\n"
             + "\n".join(_timer_lines(cfg, timers))
-            + "\n-# Wrong? Fix one with /fieldboss add or drop it with /fieldboss remove.",
+            + "\n-# Not saved yet. Wrong times? Discard, or save and fix one with /fieldboss add.",
             allowed_mentions=discord.AllowedMentions.none(),
+            view=view,
+            wait=True,
         )
 
     @field.command(name="add", description="Add a field boss timer by hand.")
@@ -441,8 +604,11 @@ def register_commands(bot: EventBot) -> None:
         boss="Boss name",
         spawns_in="Time left, like 1h 20m, 45m or 1:23:45. Or a server time like: at 21:30",
         zone="Zone (optional)",
+        respawn="How long it takes to respawn after a kill, like 2h. Used by the Killed button",
     )
-    async def field_add(interaction: discord.Interaction, boss: str, spawns_in: str, zone: str = "") -> None:
+    async def field_add(
+        interaction: discord.Interaction, boss: str, spawns_in: str, zone: str = "", respawn: str = ""
+    ) -> None:
         cfg = _config(bot, interaction.guild_id)
         spawn = fieldboss.parse_when(spawns_in, cfg.region, interaction.created_at)
         if spawn is None:
@@ -451,10 +617,22 @@ def register_commands(bot: EventBot) -> None:
                 ephemeral=True,
             )
             return
+        respawn_minutes = None
+        if respawn:
+            respawn_minutes = fieldboss.parse_duration_minutes(respawn)
+            if respawn_minutes is None:
+                await interaction.response.send_message(
+                    "I couldn't read the respawn time. Use something like `2h` or `1h 30m`.", ephemeral=True
+                )
+                return
         timer = fieldboss.FieldTimer(boss.strip()[:80], zone.strip()[:80], spawn)
         bot.storage.set_field_timer(interaction.guild_id, timer.boss, timer.zone, int(spawn.timestamp()))
+        extra = ""
+        if respawn_minutes:
+            bot.storage.set_respawn_minutes(interaction.guild_id, timer.boss, respawn_minutes)
+            extra = f"\n-# Respawn time saved: {views.respawn_text(respawn_minutes)}. The Killed button will use it."
         await interaction.response.send_message(
-            "Timer added:\n" + _timer_lines(cfg, [timer])[0], allowed_mentions=discord.AllowedMentions.none()
+            "Timer added:\n" + _timer_lines(cfg, [timer])[0] + extra, allowed_mentions=discord.AllowedMentions.none()
         )
 
     @field.command(name="remove", description="Remove a field boss timer.")
@@ -481,10 +659,122 @@ def register_commands(bot: EventBot) -> None:
 
     bot.tree.add_command(field)
 
+    @bot.tree.command(name="route", description="Send one category's pings to its own channel and role.")
+    @admin
+    @app_commands.guild_only()
+    @app_commands.describe(
+        category="Which pings",
+        channel="Channel for these pings (leave empty to use the /setup channel)",
+        role="Role to ping (leave empty to use the /setup role)",
+    )
+    @app_commands.choices(category=CATEGORY_CHOICES)
+    async def route(
+        interaction: discord.Interaction,
+        category: app_commands.Choice[str],
+        channel: discord.TextChannel | None = None,
+        role: discord.Role | None = None,
+    ) -> None:
+        bot.storage.set_route(
+            interaction.guild_id, category.value, channel.id if channel else None, role.id if role else None
+        )
+        if channel is None and role is None:
+            done = f"**{category.name}** now use the /setup channel and role."
+        else:
+            done = f"**{category.name}** now go to {channel.mention if channel else 'the /setup channel'}" \
+                   f" and ping {role.mention if role else 'the /setup role'}."
+        await interaction.response.send_message(done, embed=_status_embed(bot, interaction.guild_id), ephemeral=True)
+
+    @bot.tree.command(name="role-menu", description="Post buttons so members can turn ping roles on or off themselves.")
+    @admin
+    @app_commands.guild_only()
+    async def role_menu(interaction: discord.Interaction) -> None:
+        cfg = _config(bot, interaction.guild_id)
+        ids = [cfg.role_id] + [r for _, r in bot.storage.routes(interaction.guild_id).values()]
+        roles = []
+        for rid in ids:
+            role = interaction.guild.get_role(rid) if rid else None
+            if role is not None and role not in roles:
+                roles.append(role)
+        if not roles:
+            await interaction.response.send_message("Set a role with /setup or /route first.", ephemeral=True)
+            return
+        me = interaction.guild.me
+        if not me.guild_permissions.manage_roles or any(r >= me.top_role for r in roles):
+            warn = "\n⚠️ I need **Manage Roles**, and my role must be above these roles, for the buttons to work."
+        else:
+            warn = ""
+        await interaction.response.send_message("Posted the role buttons." + warn, ephemeral=True)
+        await interaction.channel.send(
+            "**Get pinged for Aion 2 events and bosses.** Tap a button to turn a ping role on or off.",
+            view=views.role_menu_view(roles),
+        )
+
+    @bot.tree.command(name="quiet-hours", description="Don't ping for anything starting between these server times.")
+    @admin
+    @app_commands.guild_only()
+    @app_commands.describe(
+        start="Start of quiet hours, server time, like 02:00. Leave both empty to turn quiet hours off",
+        end="End of quiet hours, server time, like 08:00",
+    )
+    async def quiet_hours(interaction: discord.Interaction, start: str = "", end: str = "") -> None:
+        cfg = _config(bot, interaction.guild_id)
+        if not start and not end:
+            cfg.quiet_start = cfg.quiet_end = None
+            done = "Quiet hours are off."
+        else:
+            qs, qe = parse_clock(start), parse_clock(end)
+            if qs is None or qe is None or qs == qe:
+                await interaction.response.send_message(
+                    "Give two different times like `02:00` and `08:00` (24-hour, server time).", ephemeral=True
+                )
+                return
+            cfg.quiet_start, cfg.quiet_end = qs, qe
+            done = f"No pings for anything starting between **{qs}** and **{qe}** server time."
+        bot.storage.save_config(cfg)
+        await interaction.response.send_message(done, embed=_status_embed(bot, interaction.guild_id), ephemeral=True)
+
+    @bot.tree.command(name="start-ping", description="Also ping when each event or boss starts.")
+    @admin
+    @app_commands.guild_only()
+    async def start_ping(interaction: discord.Interaction, enabled: bool) -> None:
+        cfg = _config(bot, interaction.guild_id)
+        cfg.start_ping = enabled
+        bot.storage.save_config(cfg)
+        done = "I'll also ping when things start." if enabled else "I'll only ping before things start."
+        await interaction.response.send_message(done, ephemeral=True)
+
+    @bot.tree.command(name="digest", description="Post a summary of the day's events and bosses after the daily reset.")
+    @admin
+    @app_commands.guild_only()
+    async def digest(interaction: discord.Interaction, enabled: bool) -> None:
+        cfg = _config(bot, interaction.guild_id)
+        cfg.digest = enabled
+        bot.storage.save_config(cfg)
+        if enabled:
+            reset = next_reset(cfg, datetime.now(timezone.utc))
+            when = f" The next one is <t:{int(reset.timestamp())}:R>." if reset else ""
+            done = "I'll post the day's schedule right after each daily reset, without pinging anyone." + when
+        else:
+            done = "Daily summary is off."
+        await interaction.response.send_message(done, ephemeral=True)
+
+    @bot.tree.command(name="auto-delete", description="Delete pings a while after the event starts, to keep the channel tidy.")
+    @admin
+    @app_commands.guild_only()
+    @app_commands.describe(minutes="Minutes after the start to delete the ping. Leave empty to keep pings")
+    async def auto_delete(
+        interaction: discord.Interaction, minutes: app_commands.Range[int, 0, 1440] | None = None
+    ) -> None:
+        cfg = _config(bot, interaction.guild_id)
+        cfg.delete_after = minutes
+        bot.storage.save_config(cfg)
+        done = "Pings are kept." if minutes is None else f"Pings are deleted {minutes} min after the start."
+        await interaction.response.send_message(done, ephemeral=True)
+
     @bot.tree.command(description="Show settings, followed events and when each is next.")
     @app_commands.guild_only()
     async def events(interaction: discord.Interaction) -> None:
-        await interaction.response.send_message(_status_text(bot, interaction.guild_id), ephemeral=True)
+        await interaction.response.send_message(embed=_status_embed(bot, interaction.guild_id), ephemeral=True)
 
     @bot.tree.command(name="test-ping", description="Post a sample announcement in the configured channel.")
     @admin

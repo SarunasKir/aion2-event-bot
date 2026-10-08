@@ -12,6 +12,9 @@ and before field bosses you add from a game screenshot.
 - Pick **how early** to ping: a server default (10 minutes unless you change it), and if you like, a different time for each event or boss.
 - Show times as **local time** (each reader's own timezone), **game server time**, or both.
 - **Field bosses:** post a screenshot of the in-game respawn timers and the bot reads them and pings before each spawn.
+  A ✅ **Killed** button on the ping starts the next respawn timer.
+- **Separate channels and roles** for events, world bosses and field bosses, plus a **Notify me** button menu so players pick their own pings.
+- Optional **quiet hours**, a **second ping at start**, a **daily summary** after reset, and **auto-deleting** old pings.
 
 Schedules come from aion2hub's [event timer](https://aion2hub.com/tools/event-timer) and [world boss timers](https://aion2hub.com/tools/world-bosses).
 
@@ -26,10 +29,11 @@ Schedules come from aion2hub's [event timer](https://aion2hub.com/tools/event-ti
 5. [Setup, step 3: configure it in your server](#step-3-configure-it-in-your-server)
 6. [Hosting it 24/7](#hosting-it-247)
 7. [Field boss timers from screenshots](#field-boss-timers-from-screenshots)
-8. [Commands](#commands)
-9. [Updating the schedule](#updating-the-schedule)
-10. [Troubleshooting](#troubleshooting)
-11. [Project layout and development](#project-layout-and-development)
+8. [Server options](#server-options)
+9. [Commands](#commands)
+10. [Updating the schedule](#updating-the-schedule)
+11. [Troubleshooting](#troubleshooting)
+12. [Project layout and development](#project-layout-and-development)
 
 ---
 
@@ -67,12 +71,19 @@ Some content exists only in some regions. For example, Abyss Rift Zone and the M
 The bot converts server time to an exact moment, and Discord's `<t:…>` timestamps then show it in each reader's local time.
 
 **The check loop.** Every 20 seconds the bot looks at each server that has run `/setup`:
-1. For every followed event or boss, it finds any start time inside that event's ping window. The window is "now" to "now + ping time".
-2. Events that start at the same moment are grouped into **one message**. For example, the three Executors produce one ping, not three.
-3. It posts that message in the chosen channel and mentions the chosen role.
-4. It records each event and start time it announced, so every occurrence is pinged **once**, even across restarts.
+1. For every followed event or boss, and every field boss timer, it finds any start time inside the ping window. The window is "now" to "now + ping time".
+2. Anything starting during **quiet hours** is skipped.
+3. Things of the same kind that start at the same moment are grouped into **one message**. For example, the three Executors produce one ping, not three.
+4. It posts each message in the channel for that kind (events, world bosses or field bosses) and mentions that kind's role.
+   Without `/route`, everything goes to the `/setup` channel and role.
+5. It records each ping it posted, so every occurrence is pinged **once**, even across restarts.
 
-If the bot was offline and comes back inside a ping window, it still pings, just with less notice. If it was offline past an event's start, that event is skipped.
+**When something goes wrong:**
+- If Discord has a hiccup and a ping fails to post, the bot tries again on the next check instead of dropping it.
+- If the channel was deleted, or the bot isn't allowed to post there, the bot tells the server's admins once, in the server's
+  system channel or by DM to the owner. It warns again only if the problem comes back after being fixed.
+- If the bot was offline and comes back inside a ping window, it still pings, just with less notice. If it was offline past an event's start, that event is skipped.
+- If the check loop ever freezes for 5 minutes, the bot exits on purpose, so Docker or systemd restarts it fresh.
 
 **Storage.** Settings live in a small SQLite file (`bot.db` by default). Each Discord server has its own settings, so one running bot can serve many servers.
 
@@ -122,6 +133,7 @@ You can add or fix any of these in [`bot/schedule.py`](bot/schedule.py). See [Up
 4. Open **OAuth2 → URL Generator**:
    - Under **Scopes**, tick `bot` and `applications.commands`.
    - Under **Bot Permissions**, tick `View Channels`, `Send Messages` and `Mention @everyone, @here and All Roles`.
+     Also tick `Manage Roles` if you'll use the `/role-menu` buttons.
 5. Copy the generated URL at the bottom, open it, choose your server and click **Authorize**.
 
 The bot now appears in your member list, offline. It comes online once you run it in step 2.
@@ -177,6 +189,8 @@ When you see `Logged in as …`, the bot is online. It pings only while this pro
 | `SCHEDULE_AUTO_UPDATE` | no | `1` | Set to `0` to turn off the daily aion2hub schedule check |
 | `ANTHROPIC_API_KEY` | for screenshots | none | Lets `/fieldboss screenshot` read images. Without it, use `/fieldboss add` |
 | `FIELD_BOSS_MODEL` | no | `claude-opus-5-5` | Which Claude model reads screenshots |
+| `HEALTH_TIMEOUT` | no | `300` | Seconds without a check before the bot restarts itself |
+| `HEALTH_FILE` | no | `/tmp/aion2bot.heartbeat` | Heartbeat file read by `python -m bot.health` (the Docker health check) |
 
 ---
 
@@ -203,6 +217,8 @@ Commands that change settings need the **Manage Server** permission.
 4. **`/test-ping`**: posts a sample ping so you can check that the channel and role work.
 5. **`/time-display`** (optional): show times as local time, server time, or both.
 6. **`/events`**: shows your settings, what's followed (✅), and when each event or boss is next.
+7. Optional extras are described in [Server options](#server-options): separate channels and roles, Notify-me buttons,
+   quiet hours, start pings, a daily summary and auto-delete.
 
 ---
 
@@ -289,11 +305,15 @@ so the bot takes that from a screenshot and pings before each spawn.
 2. The bot sends the image to Claude, Anthropic's AI model, which reads each boss name and its countdown or spawn time.
 3. Countdowns count from the moment the screenshot was posted. A time of day such as "21:30" is read as **server time**
    for your region, and if that time has already passed today, it's taken as tomorrow.
-4. The bot posts what it read, so everyone can check it, and saves one timer per boss.
+4. The bot posts what it read with **Save timers** and **Discard** buttons. Nothing is saved until the person who posted it,
+   or an admin, taps Save. Unconfirmed results are dropped after 10 minutes.
    A new screenshot or `/fieldboss add` for the same boss replaces its old timer.
 5. It pings the role before each spawn, using the server's ping time. You can give field bosses their own ping time with
    `/ping-time minutes:5 event:Field bosses (timers you add)`.
-6. Timers are cleared an hour after their spawn time. Post a new screenshot for the next respawn.
+6. Each field boss ping has a ✅ **Killed** button. Tap it after the kill to start the next respawn timer straight away.
+   The first time, the bot asks how long that boss takes to respawn (like `2h`), then remembers it.
+   You can also set it up front: `/fieldboss add boss:Silent Dartan spawns_in:45m respawn:2h`.
+7. Timers are cleared an hour after their spawn time if nobody taps Killed.
 
 > @Raiders **Silent Dartan** spawns in 10 minutes
 > 🕒 21:30 your time · 22:30 server time (KST)
@@ -330,6 +350,38 @@ The boss name suggests the known field bosses as you type, but any name works.
 
 ---
 
+## Server options
+
+All of these are optional and per server. `/events` shows which are on.
+
+**Separate channels and roles: `/route`.** Send each kind of ping to its own channel and role, for example:
+```
+/route category:World bosses channel:#boss-alerts role:@Bosses
+/route category:Events role:@PvP              ← same channel as /setup, different role
+/route category:Field bosses                  ← back to the /setup channel and role
+```
+
+**Notify-me buttons: `/role-menu`.** Posts a message with one button per ping role (the `/setup` role and any `/route` roles).
+Players tap a button to add or remove that role themselves. The bot needs **Manage Roles**, and its own role must sit
+above those roles in Server Settings → Roles. The buttons keep working after restarts.
+
+**Quiet hours: `/quiet-hours start:02:00 end:08:00`.** Nothing that *starts* between those times (server time) gets pinged.
+The range can cross midnight. Run `/quiet-hours` with no times to turn it off.
+
+**Ping at start too: `/start-ping enabled:True`.** Adds a short "🔔 … starting now!" ping when each event or boss starts,
+on top of the early warning.
+
+**Daily summary: `/digest enabled:True`.** Right after each daily reset, posts the next 24 hours of followed events,
+bosses and field boss timers in the `/setup` channel, without pinging anyone.
+
+**Auto-delete: `/auto-delete minutes:30`.** Deletes each ping (and start ping) that many minutes after the event starts,
+to keep the channel tidy. Run `/auto-delete` with no minutes to keep pings.
+
+**More detail in pings.** Pings for events with a known length show when they end (Abyss Rift Zone, Rift Domination),
+and every ping links to the matching aion2hub page.
+
+---
+
 ## Commands
 
 | Command | Who | What it does |
@@ -342,9 +394,15 @@ The boss name suggests the known field bosses as you type, but any name works.
 | `/ping-time event` | Manage Server | With no minutes, puts that event back on the server-wide time |
 | `/schedule-check` | Manage Server | Checks aion2hub now and applies any changed times |
 | `/fieldboss screenshot image` | Manage Server* | Reads field boss timers from a screenshot and pings before each spawn |
-| `/fieldboss add boss spawns_in [zone]` | Manage Server* | Adds or replaces one field boss timer by hand |
+| `/fieldboss add boss spawns_in [zone] [respawn]` | Manage Server* | Adds or replaces one field boss timer by hand, optionally with its respawn time |
 | `/fieldboss remove boss` | Manage Server* | Removes a field boss timer |
 | `/time-display mode` | Manage Server | Shows times in pings as **local time** (each reader's own timezone), **server time** (the game clock), or **both** (default) |
+| `/route category [channel] [role]` | Manage Server | Sends events, world bosses or field bosses to their own channel and role |
+| `/role-menu` | Manage Server | Posts buttons so members can turn ping roles on or off |
+| `/quiet-hours [start] [end]` | Manage Server | No pings for anything starting between two server times |
+| `/start-ping enabled` | Manage Server | Also ping when things start |
+| `/digest enabled` | Manage Server | Daily summary after the reset |
+| `/auto-delete [minutes]` | Manage Server | Deletes pings that many minutes after the start |
 | `/events` | Everyone | Shows settings, what's followed, and when each event or boss is next |
 | `/test-ping` | Manage Server | Posts a sample ping in the configured channel |
 
@@ -400,6 +458,8 @@ Discord allows at most 25 choices per option. There are 18 now: 15 events and bo
 | `/schedule-check` says it couldn't read the boss page | aion2hub changed its page layout. Times stay as they were. Update `bot/watcher.py` or edit `bot/schedule.py` by hand. |
 | `/fieldboss screenshot` says it isn't set up | Add `ANTHROPIC_API_KEY` to `.env` and restart the bot. |
 | A field boss time is off | Check the bot's list after posting. Countdowns start when the screenshot is posted, so post it right after taking it. Fix one with `/fieldboss add`. |
+| Notify-me buttons say "I can't change that role" | Give the bot **Manage Roles**, and drag its role above the ping roles in Server Settings → Roles. |
+| The bot sent me a DM about a channel | It couldn't post pings there. Fix the channel or its permissions; pings resume on their own. |
 | Pings arrive at the wrong time | Check the region in `/setup`. Korea and Taiwan are an hour apart. |
 | The bot can't post in the channel | Give the bot View Channel and Send Messages in that channel's permissions. |
 
@@ -412,10 +472,12 @@ bot/
   main.py        Discord client, slash commands and the 20-second check loop
   announcer.py   Decides what is due now, and formats the ping message
   schedule.py    Event and boss schedule data, plus time calculations
-  storage.py     SQLite: server settings, followed items, ping times, sent pings, schedule updates, field timers
+  storage.py     SQLite: server settings, routes, followed items, ping times, sent pings, schedule updates, field timers
+  views.py       Buttons and forms: Notify-me roles, field boss Killed, screenshot Save/Discard
+  health.py      Watchdog that restarts a frozen bot, and the Docker health check
   watcher.py     Daily aion2hub check: reads the pages, finds changed times, applies them
   fieldboss.py   Field boss timers: reads screenshots with Claude, and parses typed-in times
-tests/           pytest tests for the schedule, ping windows, storage, aion2hub check and field bosses
+tests/           pytest tests for the schedule, pings, delivery, options, aion2hub check and field bosses
 deploy/          systemd service file
 Dockerfile       Container image
 ```

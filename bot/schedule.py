@@ -45,6 +45,7 @@ class Event:
     description: str
     rules: dict[str, tuple[Rule, ...]] = field(default_factory=dict)
     category: str = "event"  # "event" or "boss"
+    duration_minutes: int = 0  # how long it runs, when known (shown as "ends at")
 
     def regions(self) -> list[str]:
         return list(self.rules)
@@ -60,6 +61,12 @@ _KR_TW = ("KR", "TW")
 
 def _boss(key: str, name: str, location: str, **rules: tuple[Rule, ...]) -> Event:
     return Event(key=key, name=name, description=location, rules=rules, category="boss")
+
+
+INFO_URLS = {
+    "event": "https://aion2hub.com/tools/event-timer",
+    "boss": "https://aion2hub.com/tools/world-bosses",
+}
 
 
 def _same(rule: Rule, regions=_KR_TW) -> dict[str, tuple[Rule, ...]]:
@@ -88,6 +95,7 @@ EVENTS: dict[str, Event] = {
             key="abyss_rift_zone",
             name="Abyss Rift Zone",
             description="Chapter 1 PvP, level 45+. 5 min prep, then a 30 min match.",
+            duration_minutes=35,
             rules={
                 "KR": (Rule(_hours(22), frozenset({TUE, THU})),),
                 "TW": (Rule(_hours(22), frozenset({TUE, THU})),),
@@ -98,6 +106,7 @@ EVENTS: dict[str, Event] = {
             name="Spacetime Rift Domination",
             description="Stronghold PvP, level 50 / iLvl 4,500 / 500k CP. "
             "5 min prep, 15 min match, entry closes 5 min after start.",
+            duration_minutes=20,
             rules={
                 "KR": (Rule(_hours(20, 23), frozenset({MON, THU, SAT})),),
                 "TW": (Rule(_hours(20, 23), frozenset({MON, THU, SAT})),),

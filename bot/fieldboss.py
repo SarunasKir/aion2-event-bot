@@ -179,3 +179,13 @@ def parse_when(text: str, region: str, now: datetime) -> datetime | None:
         total = timedelta(hours=h, minutes=mi, seconds=s)
         return now + total if total.total_seconds() > 0 else None
     return None
+
+
+def parse_duration_minutes(text: str) -> int | None:
+    """'2h', '90m', '1h 30m' -> minutes (1 minute to 7 days); None if unreadable."""
+    m = _DURATION_RE.match(text or "")
+    if not m or not any(m.groups()):
+        return None
+    h, mi, sec = (int(g or 0) for g in m.groups())
+    minutes = h * 60 + mi + (1 if sec else 0)
+    return minutes if 1 <= minutes <= 7 * 24 * 60 else None
