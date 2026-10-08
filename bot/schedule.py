@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 
 REGIONS: dict[str, timezone] = {
     "KR": timezone(timedelta(hours=9), "KST"),
-    "TW": timezone(timedelta(hours=8), "TST"),
+    "TW": timezone(timedelta(hours=8), "GMT+8"),
     # aion2hub lists Global (NA / EU / SA / JP) rift hours in GMT+9.
     "GLOBAL": timezone(timedelta(hours=9), "GMT+9"),
 }

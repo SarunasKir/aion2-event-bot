@@ -11,7 +11,8 @@ CREATE TABLE IF NOT EXISTS guild_config (
     channel_id   INTEGER,
     role_id      INTEGER,
     region       TEXT    NOT NULL DEFAULT 'GLOBAL',
-    lead_minutes INTEGER NOT NULL DEFAULT 10
+    lead_minutes INTEGER NOT NULL DEFAULT 10,
+    time_display TEXT    NOT NULL DEFAULT 'both'
 );
 CREATE TABLE IF NOT EXISTS subscriptions (
     guild_id  INTEGER NOT NULL,
@@ -40,17 +41,21 @@ class GuildConfig:
     role_id: int | None
     region: str
     lead_minutes: int
+    time_display: str = "both"  # "local", "server" or "both"
 
 
 class Storage:
     def __init__(self, path: str):
         self.db = sqlite3.connect(path)
         self.db.executescript(SCHEMA)
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(guild_config)")}
+        if "time_display" not in columns:  # databases created before this setting existed
+            self.db.execute("ALTER TABLE guild_config ADD COLUMN time_display TEXT NOT NULL DEFAULT 'both'")
         self.db.commit()
 
     def get_config(self, guild_id: int) -> GuildConfig | None:
         row = self.db.execute(
-            "SELECT guild_id, channel_id, role_id, region, lead_minutes "
+            "SELECT guild_id, channel_id, role_id, region, lead_minutes, time_display "
             "FROM guild_config WHERE guild_id = ?",
             (guild_id,),
         ).fetchone()
@@ -58,18 +63,19 @@ class Storage:
 
     def all_configs(self) -> list[GuildConfig]:
         rows = self.db.execute(
-            "SELECT guild_id, channel_id, role_id, region, lead_minutes FROM guild_config "
+            "SELECT guild_id, channel_id, role_id, region, lead_minutes, time_display FROM guild_config "
             "WHERE channel_id IS NOT NULL"
         ).fetchall()
         return [GuildConfig(*r) for r in rows]
 
     def save_config(self, cfg: GuildConfig) -> None:
         self.db.execute(
-            "INSERT INTO guild_config (guild_id, channel_id, role_id, region, lead_minutes) "
-            "VALUES (?, ?, ?, ?, ?) ON CONFLICT(guild_id) DO UPDATE SET "
+            "INSERT INTO guild_config (guild_id, channel_id, role_id, region, lead_minutes, time_display) "
+            "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(guild_id) DO UPDATE SET "
             "channel_id = excluded.channel_id, role_id = excluded.role_id, "
-            "region = excluded.region, lead_minutes = excluded.lead_minutes",
-            (cfg.guild_id, cfg.channel_id, cfg.role_id, cfg.region, cfg.lead_minutes),
+            "region = excluded.region, lead_minutes = excluded.lead_minutes, "
+            "time_display = excluded.time_display",
+            (cfg.guild_id, cfg.channel_id, cfg.role_id, cfg.region, cfg.lead_minutes, cfg.time_display),
         )
         self.db.commit()
 

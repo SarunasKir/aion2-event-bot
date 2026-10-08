@@ -10,7 +10,7 @@ import discord
 from discord import app_commands
 from discord.ext import tasks
 
-from .announcer import due, format_ping
+from .announcer import TIME_DISPLAYS, due, format_ping, format_time
 from .schedule import EVENTS, REGION_LABELS, REGIONS, next_occurrence
 from .storage import GuildConfig, Storage
 
@@ -24,6 +24,7 @@ EVENT_CHOICES = [
     app_commands.Choice(name="All events", value="*event"),
     app_commands.Choice(name="Everything", value="*"),
 ]
+TIME_DISPLAY_CHOICES = [app_commands.Choice(name=label, value=key) for key, label in TIME_DISPLAYS.items()]
 REGION_CHOICES = [app_commands.Choice(name=label, value=key) for key, label in REGION_LABELS.items()]
 DEFAULT_LEAD = int(os.getenv("DEFAULT_LEAD_MINUTES", "10"))
 
@@ -58,7 +59,7 @@ class EventBot(discord.Client):
             for start, events in by_start.items():
                 try:
                     await channel.send(
-                        format_ping(events, start, cfg.role_id),
+                        format_ping(events, start, cfg),
                         allowed_mentions=discord.AllowedMentions(roles=True),
                     )
                 except discord.HTTPException:
@@ -96,6 +97,7 @@ def _status_text(bot: EventBot, guild_id: int) -> str:
         f"**Role:** {role}",
         f"**Server region:** {REGION_LABELS[cfg.region]}",
         f"**Ping:** {_minutes(cfg.lead_minutes)} (change with /ping-time)",
+        f"**Times shown as:** {TIME_DISPLAYS[cfg.time_display]} (change with /time-display)",
         "",
     ]
     followed = set(bot.storage.followed(guild_id))
@@ -107,7 +109,11 @@ def _status_text(bot: EventBot, guild_id: int) -> str:
                 continue
             mark = "✅" if event.key in followed else "▫️"
             nxt = next_occurrence(event, cfg.region, now)
-            when = f"next <t:{int(nxt.timestamp())}:R>" if nxt else "not in this region"
+            when = (
+                f"next <t:{int(nxt.timestamp())}:R>, {format_time(nxt, cfg.region, cfg.time_display)}"
+                if nxt
+                else "not in this region"
+            )
             custom = f" · ping {_minutes(overrides[event.key])}" if event.key in overrides else ""
             lines.append(f"{mark} {event.name}: {when}{custom}")
         lines.append("")
@@ -212,6 +218,20 @@ def register_commands(bot: EventBot) -> None:
             done + "\n\n" + _status_text(bot, interaction.guild_id), ephemeral=True
         )
 
+    @bot.tree.command(name="time-display", description="Show times in pings as local time, server time, or both.")
+    @admin
+    @app_commands.guild_only()
+    @app_commands.describe(mode="Local = each reader's own timezone; server = the game's server clock")
+    @app_commands.choices(mode=TIME_DISPLAY_CHOICES)
+    async def time_display(interaction: discord.Interaction, mode: app_commands.Choice[str]) -> None:
+        cfg = _config(bot, interaction.guild_id)
+        cfg.time_display = mode.value
+        bot.storage.save_config(cfg)
+        await interaction.response.send_message(
+            f"Pings now show **{mode.name.lower()}**.\n\n" + _status_text(bot, interaction.guild_id),
+            ephemeral=True,
+        )
+
     @bot.tree.command(description="Show settings, followed events and when each is next.")
     @app_commands.guild_only()
     async def events(interaction: discord.Interaction) -> None:
@@ -229,7 +249,7 @@ def register_commands(bot: EventBot) -> None:
         event = EVENTS["spacetime_rift"]
         start = datetime.now(timezone.utc) + timedelta(minutes=cfg.lead_minutes)
         await channel.send(
-            "🧪 Test announcement\n" + format_ping([event], start, cfg.role_id),
+            "🧪 Test announcement\n" + format_ping([event], start, cfg),
             allowed_mentions=discord.AllowedMentions(roles=True),
         )
         await interaction.response.send_message(f"Sent a test to {channel.mention}.", ephemeral=True)

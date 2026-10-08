@@ -2,13 +2,14 @@
 
 A Discord bot that pings a role in a channel before the Aion 2 events and world bosses you choose.
 
-> @Raiders **Executor Argo**, **Executor Kaira** spawn in 10 minutes (22:30).
+> @Raiders **Executor Argo**, **Executor Kaira** spawn in 10 minutes
+> 🕒 21:30 your time · 22:30 server time (KST)
 > 📍 Chaotic Lower Reshanta
 
 - Pick the **channel**, the **role** to ping and your **region** (Korea, Taiwan or Global).
 - Pick exactly which **events and bosses** to follow. Nothing else gets pinged.
 - Pick **how early** to ping: a server default (10 minutes unless you change it), and if you like, a different time for each event or boss.
-- Each ping time shows in every reader's own timezone.
+- Show times as **local time** (each reader's own timezone), **game server time**, or both.
 
 Schedules come from aion2hub's [event timer](https://aion2hub.com/tools/event-timer) and [world boss timers](https://aion2hub.com/tools/world-bosses).
 
@@ -177,7 +178,8 @@ Commands that change settings need the **Manage Server** permission.
    /ping-time minutes:30 event:Boss: Watcher Kaira       ← just this boss
    ```
 4. **`/test-ping`**: posts a sample ping so you can check that the channel and role work.
-5. **`/events`**: shows your settings, what's followed (✅), and when each event or boss is next.
+5. **`/time-display`** (optional): show times as local time, server time, or both.
+6. **`/events`**: shows your settings, what's followed (✅), and when each event or boss is next.
 
 ---
 
@@ -263,6 +265,7 @@ Your settings are kept, because they live in the database, not in the code.
 | `/ping-time minutes` | Manage Server | Sets the server-wide ping time, 0 to 120 minutes (0 = at start) |
 | `/ping-time minutes event` | Manage Server | Gives one event or boss, or a shortcut group, its own ping time |
 | `/ping-time event` | Manage Server | With no minutes, puts that event back on the server-wide time |
+| `/time-display mode` | Manage Server | Shows times in pings as **local time** (each reader's own timezone), **server time** (the game clock), or **both** (default) |
 | `/events` | Everyone | Shows settings, what's followed, and when each event or boss is next |
 | `/test-ping` | Manage Server | Posts a sample ping in the configured channel |
 

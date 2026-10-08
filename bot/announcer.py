@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from .schedule import EVENTS, Event, occurrences
+from .schedule import EVENTS, REGIONS, Event, occurrences
 from .storage import GuildConfig
 
 
@@ -38,13 +38,33 @@ def due(
     return result
 
 
-def format_ping(events: list[Event], start: datetime, role_id: int | None) -> str:
+TIME_DISPLAYS = {
+    "local": "Local time (each reader's own timezone)",
+    "server": "Server time (game clock)",
+    "both": "Both local and server time",
+}
+
+
+def format_time(start: datetime, region: str, mode: str) -> str:
+    """Clock time of `start` as local time, game server time, or both."""
+    local = f"<t:{int(start.timestamp())}:t> your time"
+    server_tz = REGIONS[region]
+    server = f"{start.astimezone(server_tz):%H:%M} server time ({server_tz.tzname(None)})"
+    if mode == "local":
+        return local
+    if mode == "server":
+        return server
+    return f"{local} · {server}"
+
+
+def format_ping(events: list[Event], start: datetime, cfg: GuildConfig) -> str:
     """One message for everything starting at `start`, e.g. three Executors at 22:30."""
     ts = int(start.timestamp())
-    mention = f"<@&{role_id}> " if role_id else ""
+    mention = f"<@&{cfg.role_id}> " if cfg.role_id else ""
     names = ", ".join(f"**{e.name}**" for e in events)
     verb = "spawns" if all(e.category == "boss" for e in events) else "starts"
     if len(events) > 1:
         verb = verb[:-1]
     details = sorted({("📍 " if e.category == "boss" else "") + e.description for e in events})
-    return f"{mention}{names} {verb} <t:{ts}:R> (<t:{ts}:t>).\n" + "\n".join(f"-# {d}" for d in details)
+    when = format_time(start, cfg.region, cfg.time_display)
+    return f"{mention}{names} {verb} <t:{ts}:R>\n🕒 {when}\n" + "\n".join(f"-# {d}" for d in details)

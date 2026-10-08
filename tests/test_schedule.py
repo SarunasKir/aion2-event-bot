@@ -72,7 +72,7 @@ def test_executors_share_one_ping_on_kr():
     spawn = kst(2026, 10, 7, 22, 30)
     hits = due(cfg, ["executor_argo", "executor_kaira", "spacetime_rift"], spawn - timedelta(minutes=10))
     assert {e.key for e, _ in hits} == {"executor_argo", "executor_kaira"}
-    msg = format_ping([e for e, _ in hits], spawn, 20)
+    msg = format_ping([e for e, _ in hits], spawn, cfg)
     assert msg.startswith("<@&20> **Executor Argo**, **Executor Kaira** spawn <t:")
 
 
@@ -105,3 +105,34 @@ def test_per_event_lead_override(tmp_path):
     # Without the override the server default (10 min) applies.
     s.set_lead_override(1, "spacetime_rift", None)
     assert due(cfg, ["spacetime_rift"], early, s.lead_overrides(1)) == []
+
+
+def test_time_display_modes():
+    from bot.announcer import format_time
+
+    spawn = kst(2026, 10, 7, 22, 30)
+    ts = int(spawn.timestamp())
+    assert format_time(spawn, "KR", "local") == f"<t:{ts}:t> your time"
+    assert format_time(spawn, "KR", "server") == "22:30 server time (KST)"
+    assert format_time(spawn, "TW", "server") == "21:30 server time (GMT+8)"
+    assert format_time(spawn, "KR", "both") == f"<t:{ts}:t> your time · 22:30 server time (KST)"
+
+
+def test_time_display_saved_and_old_db_migrated(tmp_path):
+    import sqlite3
+
+    path = str(tmp_path / "old.db")
+    old = sqlite3.connect(path)
+    old.execute(
+        "CREATE TABLE guild_config (guild_id INTEGER PRIMARY KEY, channel_id INTEGER, role_id INTEGER, "
+        "region TEXT NOT NULL DEFAULT 'GLOBAL', lead_minutes INTEGER NOT NULL DEFAULT 10)"
+    )
+    old.execute("INSERT INTO guild_config VALUES (1, 2, 3, 'KR', 10)")
+    old.commit()
+    old.close()
+    s = Storage(path)
+    cfg = s.get_config(1)
+    assert cfg.time_display == "both"
+    cfg.time_display = "server"
+    s.save_config(cfg)
+    assert s.get_config(1).time_display == "server"
