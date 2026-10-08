@@ -18,6 +18,12 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     event_key TEXT    NOT NULL,
     PRIMARY KEY (guild_id, event_key)
 );
+CREATE TABLE IF NOT EXISTS lead_overrides (
+    guild_id     INTEGER NOT NULL,
+    event_key    TEXT    NOT NULL,
+    lead_minutes INTEGER NOT NULL,
+    PRIMARY KEY (guild_id, event_key)
+);
 CREATE TABLE IF NOT EXISTS sent (
     guild_id  INTEGER NOT NULL,
     event_key TEXT    NOT NULL,
@@ -86,6 +92,28 @@ class Storage:
             "DELETE FROM subscriptions WHERE guild_id = ? AND event_key = ?",
             (guild_id, event_key),
         )
+        self.db.commit()
+
+    def lead_overrides(self, guild_id: int) -> dict[str, int]:
+        rows = self.db.execute(
+            "SELECT event_key, lead_minutes FROM lead_overrides WHERE guild_id = ?",
+            (guild_id,),
+        ).fetchall()
+        return dict(rows)
+
+    def set_lead_override(self, guild_id: int, event_key: str, minutes: int | None) -> None:
+        """Set how early to ping for one event; None goes back to the server default."""
+        if minutes is None:
+            self.db.execute(
+                "DELETE FROM lead_overrides WHERE guild_id = ? AND event_key = ?",
+                (guild_id, event_key),
+            )
+        else:
+            self.db.execute(
+                "INSERT INTO lead_overrides (guild_id, event_key, lead_minutes) VALUES (?, ?, ?) "
+                "ON CONFLICT(guild_id, event_key) DO UPDATE SET lead_minutes = excluded.lead_minutes",
+                (guild_id, event_key, minutes),
+            )
         self.db.commit()
 
     def mark_sent(self, guild_id: int, event_key: str, starts_at: int) -> bool:

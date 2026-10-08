@@ -50,7 +50,9 @@ class EventBot(discord.Client):
             if channel is None:
                 continue
             by_start: dict[datetime, list] = {}
-            for event, start in due(cfg, self.storage.followed(cfg.guild_id), now):
+            for event, start in due(
+                cfg, self.storage.followed(cfg.guild_id), now, self.storage.lead_overrides(cfg.guild_id)
+            ):
                 if self.storage.mark_sent(cfg.guild_id, event.key, int(start.timestamp())):
                     by_start.setdefault(start, []).append(event)
             for start, events in by_start.items():
@@ -80,6 +82,10 @@ def _expand(choice: str) -> list[str]:
     return [choice]
 
 
+def _minutes(lead: int) -> str:
+    return "at start" if lead == 0 else f"{lead} min before"
+
+
 def _status_text(bot: EventBot, guild_id: int) -> str:
     cfg = _config(bot, guild_id)
     now = datetime.now(timezone.utc)
@@ -89,10 +95,11 @@ def _status_text(bot: EventBot, guild_id: int) -> str:
         f"**Channel:** {channel}",
         f"**Role:** {role}",
         f"**Server region:** {REGION_LABELS[cfg.region]}",
-        f"**Ping:** {cfg.lead_minutes} min before start",
+        f"**Ping:** {_minutes(cfg.lead_minutes)} (change with /ping-time)",
         "",
     ]
     followed = set(bot.storage.followed(guild_id))
+    overrides = bot.storage.lead_overrides(guild_id)
     for category, title in [("event", "Events"), ("boss", "World bosses")]:
         lines.append(f"**{title}** (✅ = pinged):")
         for event in EVENTS.values():
@@ -101,7 +108,8 @@ def _status_text(bot: EventBot, guild_id: int) -> str:
             mark = "✅" if event.key in followed else "▫️"
             nxt = next_occurrence(event, cfg.region, now)
             when = f"next <t:{int(nxt.timestamp())}:R>" if nxt else "not in this region"
-            lines.append(f"{mark} {event.name}: {when}")
+            custom = f" · ping {_minutes(overrides[event.key])}" if event.key in overrides else ""
+            lines.append(f"{mark} {event.name}: {when}{custom}")
         lines.append("")
     return "\n".join(lines)
 
@@ -168,6 +176,40 @@ def register_commands(bot: EventBot) -> None:
             bot.storage.unfollow(interaction.guild_id, key)
         await interaction.response.send_message(
             f"Stopped **{event.name}**.\n\n" + _status_text(bot, interaction.guild_id), ephemeral=True
+        )
+
+    @bot.tree.command(name="ping-time", description="Set how many minutes before the start to ping.")
+    @admin
+    @app_commands.guild_only()
+    @app_commands.describe(
+        minutes="Minutes before start (0 = at start). Leave empty with an event to reset it to the server default.",
+        event="Only change this event or boss. Leave empty to change the server default.",
+    )
+    @app_commands.choices(event=EVENT_CHOICES)
+    async def ping_time(
+        interaction: discord.Interaction,
+        minutes: app_commands.Range[int, 0, 120] | None = None,
+        event: app_commands.Choice[str] | None = None,
+    ) -> None:
+        if event is None:
+            if minutes is None:
+                await interaction.response.send_message(
+                    "Give minutes to change the server default, or pick an event to reset it.", ephemeral=True
+                )
+                return
+            cfg = _config(bot, interaction.guild_id)
+            cfg.lead_minutes = minutes
+            bot.storage.save_config(cfg)
+            done = f"Server default is now **{_minutes(minutes)}**. Events with their own time keep it."
+        else:
+            for key in _expand(event.value):
+                bot.storage.set_lead_override(interaction.guild_id, key, minutes)
+            if minutes is None:
+                done = f"**{event.name}** now uses the server default."
+            else:
+                done = f"**{event.name}** now pings **{_minutes(minutes)}**."
+        await interaction.response.send_message(
+            done + "\n\n" + _status_text(bot, interaction.guild_id), ephemeral=True
         )
 
     @bot.tree.command(description="Show settings, followed events and when each is next.")

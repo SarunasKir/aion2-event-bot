@@ -8,21 +8,30 @@ from .schedule import EVENTS, Event, occurrences
 from .storage import GuildConfig
 
 
-def due(cfg: GuildConfig, followed: list[str], now: datetime) -> list[tuple[Event, datetime]]:
-    """Followed events starting within the next `lead_minutes`.
+def due(
+    cfg: GuildConfig,
+    followed: list[str],
+    now: datetime,
+    lead_overrides: dict[str, int] | None = None,
+) -> list[tuple[Event, datetime]]:
+    """Followed events starting within their lead time.
+
+    Each event uses its entry in `lead_overrides`, or else the server's
+    `lead_minutes`.
 
     The caller de-duplicates through Storage.mark_sent, so a check that runs
     every few seconds pings each occurrence once. If the bot comes online
     inside the lead window it still pings, just with less notice. The window
     reaches one minute into the past so a lead time of 0 ("at start") works.
     """
-    end = now + timedelta(minutes=cfg.lead_minutes)
+    lead_overrides = lead_overrides or {}
     begin = now - timedelta(minutes=1)
     result = []
     for key in followed:
         event = EVENTS.get(key)
         if event is None:
             continue
+        end = now + timedelta(minutes=lead_overrides.get(key, cfg.lead_minutes))
         for start in occurrences(event, cfg.region, begin, end):
             result.append((event, start))
     result.sort(key=lambda pair: pair[1])

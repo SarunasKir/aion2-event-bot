@@ -93,3 +93,15 @@ def test_unfollowed_bosses_are_not_pinged():
     siege = datetime(2026, 10, 9, 21, 0, tzinfo=REGIONS["GLOBAL"])  # Friday
     assert due(cfg, ["daily_reset", "executor_argo"], siege - timedelta(minutes=10)) == []
     assert [e.key for e, _ in due(cfg, ["abyss_siege_boss"], siege - timedelta(minutes=10))] == ["abyss_siege_boss"]
+
+
+def test_per_event_lead_override(tmp_path):
+    s = Storage(str(tmp_path / "t.db"))
+    s.set_lead_override(1, "spacetime_rift", 30)
+    cfg = GuildConfig(1, 10, 20, "KR", 10)
+    rift = kst(2026, 10, 8, 14, 0)
+    early = rift - timedelta(minutes=30)
+    assert [e.key for e, _ in due(cfg, ["spacetime_rift"], early, s.lead_overrides(1))] == ["spacetime_rift"]
+    # Without the override the server default (10 min) applies.
+    s.set_lead_override(1, "spacetime_rift", None)
+    assert due(cfg, ["spacetime_rift"], early, s.lead_overrides(1)) == []

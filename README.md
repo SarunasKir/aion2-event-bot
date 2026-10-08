@@ -9,7 +9,7 @@ Server admins pick:
 - the **role** to ping
 - the **region** (Korea, Taiwan or Global) so times match their servers
 - which **events and bosses** to follow
-- how early to ping (default **10 minutes**; 0 pings at start)
+- how early to ping: a server default (**10 minutes** unless changed) and, if wanted, a different time per event or boss
 
 Example announcement:
 
@@ -54,6 +54,8 @@ aren't included, because aion2hub doesn't publish their start minutes. You can a
 | `/setup channel role [region] [lead_minutes]` | Manage Server | Sets where and whom to ping |
 | `/follow event` | Manage Server | Starts pinging an event or boss, or "All bosses", "All events" or "Everything" |
 | `/unfollow event` | Manage Server | Stops pinging an event or boss |
+| `/ping-time minutes` | Manage Server | Sets how many minutes before the start to ping, for the whole server (0 = at start) |
+| `/ping-time minutes event` | Manage Server | Gives one event or boss (or "All bosses") its own ping time. Leave out `minutes` to go back to the server default |
 | `/events` | Everyone | Shows settings, what's followed, and when each event or boss is next |
 | `/test-ping` | Manage Server | Posts a sample ping in the configured channel |
 
