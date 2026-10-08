@@ -153,7 +153,9 @@ async def read_screenshot(image: bytes, media_type: str) -> list[dict]:
         raise ReadError("Too many timers in one screenshot. Crop it into smaller parts.")
     text = next((b.text for b in response.content if b.type == "text"), "")
     try:
-        return json.loads(text)["bosses"]
+        items = json.loads(text)["bosses"]
+        log.info("Screenshot read %d timer(s): %s", len(items), json.dumps(items, ensure_ascii=False))
+        return items
     except (ValueError, KeyError, TypeError):
         log.error("Unexpected screenshot reply: %r", text[:500])
         raise ReadError("Couldn't understand the screenshot. Try again or use /fieldboss add.")

@@ -67,7 +67,12 @@ class EventBot(discord.Client):
         self.storage.set_meta("schedule_checked_at", datetime.now(timezone.utc).isoformat())
         for p in problems:
             log.warning("Schedule check: %s", p)
-        log.info("Schedule check: %d item(s) read, %d changed", len(parsed), len(changes))
+        for (key, region), rule in sorted(parsed.items()):
+            log.info("Schedule check read: %s (%s) = %s", key, region, watcher.describe(rule))
+        bosses = sum(1 for k, _ in parsed if EVENTS[k].category == "boss")
+        summary = f"Read {bosses} boss time(s) and {len(parsed) - bosses} event time(s) from aion2hub."
+        self.storage.set_meta("schedule_last_read", summary)
+        log.info("Schedule check: %s %d changed", summary, len(changes))
         return changes, problems, versions
 
     @tasks.loop(hours=24)
@@ -100,38 +105,101 @@ class EventBot(discord.Client):
     async def check_events(self) -> None:
         now = datetime.now(timezone.utc)
         for cfg in self.storage.all_configs():
-            channel = self.get_channel(cfg.channel_id)
-            if channel is None:
-                continue
-            by_start: dict[datetime, list] = {}
-            for event, start in due(
-                cfg, self.storage.followed(cfg.guild_id), now, self.storage.lead_overrides(cfg.guild_id)
-            ):
-                if self.storage.mark_sent(cfg.guild_id, event.key, int(start.timestamp())):
-                    by_start.setdefault(start, []).append(event)
-            for start, events in by_start.items():
-                try:
-                    await channel.send(
-                        format_ping(events, start, cfg),
-                        allowed_mentions=discord.AllowedMentions(roles=True),
-                    )
-                except discord.HTTPException:
-                    log.exception("Could not post %s in guild %s", [e.key for e in events], cfg.guild_id)
-            field = due_field(
-                cfg, self.storage.field_timers(cfg.guild_id), now, self.storage.lead_overrides(cfg.guild_id)
-            )
-            for boss, zone, start in field:
-                if not self.storage.mark_sent(cfg.guild_id, f"field:{boss.lower()}", int(start.timestamp())):
-                    continue
-                try:
-                    await channel.send(
-                        format_field_ping(boss, zone, start, cfg),
-                        allowed_mentions=discord.AllowedMentions(roles=True),
-                    )
-                except discord.HTTPException:
-                    log.exception("Could not post field boss %s in guild %s", boss, cfg.guild_id)
+            try:
+                await self._check_guild(cfg, now)
+            except Exception:
+                log.exception("Check failed for guild %s", cfg.guild_id)
         self.storage.prune_field_timers(int((now - timedelta(hours=1)).timestamp()))
         self.storage.prune_sent(int((now - timedelta(days=2)).timestamp()))
+
+    async def _check_guild(self, cfg: GuildConfig, now: datetime) -> None:
+        guild = self.get_guild(cfg.guild_id)
+        if guild is None:
+            return  # the bot was removed from this server
+        overrides = self.storage.lead_overrides(cfg.guild_id)
+        # Each message: (list of (sent key, start timestamp), text)
+        messages: list[tuple[list[tuple[str, int]], str]] = []
+        by_start: dict[datetime, list] = {}
+        for event, start in due(cfg, self.storage.followed(cfg.guild_id), now, overrides):
+            if not self.storage.was_sent(cfg.guild_id, event.key, int(start.timestamp())):
+                by_start.setdefault(start, []).append(event)
+        for start, events in by_start.items():
+            keys = [(e.key, int(start.timestamp())) for e in events]
+            messages.append((keys, format_ping(events, start, cfg)))
+        for boss, zone, start in due_field(cfg, self.storage.field_timers(cfg.guild_id), now, overrides):
+            key = (f"field:{boss.lower()}", int(start.timestamp()))
+            if not self.storage.was_sent(cfg.guild_id, *key):
+                messages.append(([key], format_field_ping(boss, zone, start, cfg)))
+        if not messages:
+            return
+
+        channel = guild.get_channel(cfg.channel_id)
+        if channel is None:
+            await self._warn_admins(
+                guild, "channel_missing",
+                f"I can't find the announcement channel I was set up with in **{guild.name}**, "
+                "so event pings aren't being posted. Run `/setup` to pick a channel.",
+            )
+            return
+        if not channel.permissions_for(guild.me).send_messages:
+            await self._warn_admins(
+                guild, "no_permission",
+                f"I don't have permission to send messages in {channel.mention} on **{guild.name}**, "
+                "so event pings aren't being posted. Give me View Channel and Send Messages there.",
+            )
+            return
+
+        for keys, text in messages:
+            # Mark first so a slow send can't be posted twice by the next check;
+            # undo the mark if the send fails, so the next check retries it.
+            for key, ts in keys:
+                self.storage.mark_sent(cfg.guild_id, key, ts)
+            try:
+                await channel.send(text, allowed_mentions=discord.AllowedMentions(roles=True))
+            except discord.Forbidden:
+                for key, ts in keys:
+                    self.storage.unmark_sent(cfg.guild_id, key, ts)
+                await self._warn_admins(
+                    guild, "no_permission",
+                    f"Discord refused my message in {channel.mention} on **{guild.name}**, "
+                    "so event pings aren't being posted. Check my permissions in that channel.",
+                )
+                return
+            except discord.HTTPException as e:
+                for key, ts in keys:
+                    self.storage.unmark_sent(cfg.guild_id, key, ts)
+                log.warning("Ping in guild %s failed (%s); will retry: %s", cfg.guild_id, e.status, [k for k, _ in keys])
+                return
+        self._clear_warning(guild.id)
+
+    async def _warn_admins(self, guild: discord.Guild, problem: str, text: str) -> None:
+        """Tell the server's admins about a problem once, until it's fixed."""
+        meta_key = f"warned:{guild.id}"
+        if self.storage.get_meta(meta_key) == problem:
+            return
+        log.warning("Guild %s: %s", guild.id, problem)
+        text = f"⚠️ **Aion 2 Event Bot:** {text}"
+        system = guild.system_channel
+        delivered = False
+        if system is not None and system.permissions_for(guild.me).send_messages:
+            try:
+                await system.send(text, allowed_mentions=discord.AllowedMentions.none())
+                delivered = True
+            except discord.HTTPException:
+                pass
+        if not delivered:
+            try:
+                owner = guild.owner or await self.fetch_user(guild.owner_id)
+                await owner.send(text)
+                delivered = True
+            except discord.HTTPException:
+                log.warning("Couldn't warn the admins of guild %s", guild.id)
+        if delivered:
+            self.storage.set_meta(meta_key, problem)
+
+    def _clear_warning(self, guild_id: int) -> None:
+        if self.storage.get_meta(f"warned:{guild_id}"):
+            self.storage.set_meta(f"warned:{guild_id}", "")
 
     @check_events.before_loop
     async def before_check(self) -> None:
@@ -319,6 +387,7 @@ def register_commands(bot: EventBot) -> None:
             lines = ["Updated these times from aion2hub:"] + [f"• {c.line()}" for c in changes]
         else:
             lines = ["No time changes: the bot already matches aion2hub."]
+        lines.append(bot.storage.get_meta("schedule_last_read") or "")
         lines += [f"⚠️ {p}" for p in problems]
         if versions:
             lines.append(f"-# Source data: {', '.join(versions)}")

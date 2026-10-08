@@ -172,6 +172,21 @@ class Storage:
         )
         self.db.commit()
 
+    def was_sent(self, guild_id: int, event_key: str, starts_at: int) -> bool:
+        row = self.db.execute(
+            "SELECT 1 FROM sent WHERE guild_id = ? AND event_key = ? AND starts_at = ?",
+            (guild_id, event_key, starts_at),
+        ).fetchone()
+        return row is not None
+
+    def unmark_sent(self, guild_id: int, event_key: str, starts_at: int) -> None:
+        """Forget a ping that failed to post, so it is tried again."""
+        self.db.execute(
+            "DELETE FROM sent WHERE guild_id = ? AND event_key = ? AND starts_at = ?",
+            (guild_id, event_key, starts_at),
+        )
+        self.db.commit()
+
     def mark_sent(self, guild_id: int, event_key: str, starts_at: int) -> bool:
         """Record a ping. Returns False if this occurrence was already announced."""
         cur = self.db.execute(
