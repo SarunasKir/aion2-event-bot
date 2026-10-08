@@ -12,10 +12,10 @@ import discord
 from discord import app_commands
 from discord.ext import tasks
 
-from .announcer import TIME_DISPLAYS, due, format_ping, format_time
+from .announcer import FIELD_LEAD_KEY, TIME_DISPLAYS, due, due_field, format_field_ping, format_ping, format_time
 from .schedule import EVENTS, REGION_LABELS, REGIONS, next_occurrence
 from .storage import GuildConfig, Storage
-from . import watcher
+from . import fieldboss, watcher
 
 log = logging.getLogger("aion2bot")
 
@@ -27,6 +27,7 @@ EVENT_CHOICES = [
     app_commands.Choice(name="All events", value="*event"),
     app_commands.Choice(name="Everything", value="*"),
 ]
+PING_TIME_CHOICES = EVENT_CHOICES + [app_commands.Choice(name="Field bosses (timers you add)", value=FIELD_LEAD_KEY)]
 TIME_DISPLAY_CHOICES = [app_commands.Choice(name=label, value=key) for key, label in TIME_DISPLAYS.items()]
 REGION_CHOICES = [app_commands.Choice(name=label, value=key) for key, label in REGION_LABELS.items()]
 DEFAULT_LEAD = int(os.getenv("DEFAULT_LEAD_MINUTES", "10"))
@@ -116,6 +117,20 @@ class EventBot(discord.Client):
                     )
                 except discord.HTTPException:
                     log.exception("Could not post %s in guild %s", [e.key for e in events], cfg.guild_id)
+            field = due_field(
+                cfg, self.storage.field_timers(cfg.guild_id), now, self.storage.lead_overrides(cfg.guild_id)
+            )
+            for boss, zone, start in field:
+                if not self.storage.mark_sent(cfg.guild_id, f"field:{boss.lower()}", int(start.timestamp())):
+                    continue
+                try:
+                    await channel.send(
+                        format_field_ping(boss, zone, start, cfg),
+                        allowed_mentions=discord.AllowedMentions(roles=True),
+                    )
+                except discord.HTTPException:
+                    log.exception("Could not post field boss %s in guild %s", boss, cfg.guild_id)
+        self.storage.prune_field_timers(int((now - timedelta(hours=1)).timestamp()))
         self.storage.prune_sent(int((now - timedelta(days=2)).timestamp()))
 
     @check_events.before_loop
@@ -169,6 +184,16 @@ def _status_text(bot: EventBot, guild_id: int) -> str:
             custom = f" · ping {_minutes(overrides[event.key])}" if event.key in overrides else ""
             lines.append(f"{mark} {event.name}: {when}{custom}")
         lines.append("")
+    timers = bot.storage.field_timers(guild_id)
+    field_lead = overrides.get(FIELD_LEAD_KEY)
+    custom = f" · ping {_minutes(field_lead)}" if field_lead is not None else ""
+    lines.append(f"**Field boss timers**{custom} (add with /fieldboss):")
+    if not timers:
+        lines.append("None yet.")
+    for boss, zone, ts in timers:
+        start = datetime.fromtimestamp(ts, timezone.utc)
+        where = f" ({zone})" if zone else ""
+        lines.append(f"⏳ {boss}{where}: <t:{ts}:R>, {format_time(start, cfg.region, cfg.time_display)}")
     return "\n".join(lines)
 
 
@@ -243,7 +268,7 @@ def register_commands(bot: EventBot) -> None:
         minutes="Minutes before start (0 = at start). Leave empty with an event to reset it to the server default.",
         event="Only change this event or boss. Leave empty to change the server default.",
     )
-    @app_commands.choices(event=EVENT_CHOICES)
+    @app_commands.choices(event=PING_TIME_CHOICES)
     async def ping_time(
         interaction: discord.Interaction,
         minutes: app_commands.Range[int, 0, 120] | None = None,
@@ -260,7 +285,7 @@ def register_commands(bot: EventBot) -> None:
             bot.storage.save_config(cfg)
             done = f"Server default is now **{_minutes(minutes)}**. Events with their own time keep it."
         else:
-            for key in _expand(event.value):
+            for key in _expand(event.value) if event.value != FIELD_LEAD_KEY else [FIELD_LEAD_KEY]:
                 bot.storage.set_lead_override(interaction.guild_id, key, minutes)
             if minutes is None:
                 done = f"**{event.name}** now uses the server default."
@@ -300,6 +325,92 @@ def register_commands(bot: EventBot) -> None:
         if not AUTO_UPDATE:
             lines.append("-# The daily automatic check is turned off (SCHEDULE_AUTO_UPDATE=0).")
         await interaction.followup.send("\n".join(lines), ephemeral=True)
+
+    field = app_commands.Group(
+        name="fieldboss",
+        description="Field boss timers from a screenshot or typed in.",
+        guild_only=True,
+        default_permissions=discord.Permissions(manage_guild=True),
+    )
+
+    def _timer_lines(cfg: GuildConfig, timers: list[fieldboss.FieldTimer]) -> list[str]:
+        return [
+            f"• **{t.boss}**{f' ({t.zone})' if t.zone else ''}: <t:{int(t.spawn_at.timestamp())}:R>, "
+            f"{format_time(t.spawn_at, cfg.region, cfg.time_display)}"
+            for t in timers
+        ]
+
+    @field.command(name="screenshot", description="Read field boss timers from a game screenshot.")
+    @app_commands.describe(image="Screenshot showing field boss respawn timers")
+    async def field_screenshot(interaction: discord.Interaction, image: discord.Attachment) -> None:
+        cfg = _config(bot, interaction.guild_id)
+        await interaction.response.defer(thinking=True)
+        taken_at = interaction.created_at
+        try:
+            items = await fieldboss.read_screenshot(await image.read(), (image.content_type or "").split(";")[0])
+        except fieldboss.ReadError as e:
+            await interaction.followup.send(f"⚠️ {e}")
+            return
+        timers = fieldboss.to_timers(items, cfg.region, taken_at)
+        if not timers:
+            await interaction.followup.send(
+                "I couldn't find any field boss timers in that screenshot. Try a tighter crop, or use /fieldboss add."
+            )
+            return
+        for t in timers:
+            bot.storage.set_field_timer(interaction.guild_id, t.boss, t.zone, int(t.spawn_at.timestamp()))
+        lead = bot.storage.lead_overrides(interaction.guild_id).get(FIELD_LEAD_KEY, cfg.lead_minutes)
+        await interaction.followup.send(
+            f"Added {len(timers)} field boss timer(s). I'll ping {_minutes(lead)} each spawn:\n"
+            + "\n".join(_timer_lines(cfg, timers))
+            + "\n-# Wrong? Fix one with /fieldboss add or drop it with /fieldboss remove.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @field.command(name="add", description="Add a field boss timer by hand.")
+    @app_commands.describe(
+        boss="Boss name",
+        spawns_in="Time left, like 1h 20m, 45m or 1:23:45. Or a server time like: at 21:30",
+        zone="Zone (optional)",
+    )
+    async def field_add(interaction: discord.Interaction, boss: str, spawns_in: str, zone: str = "") -> None:
+        cfg = _config(bot, interaction.guild_id)
+        spawn = fieldboss.parse_when(spawns_in, cfg.region, interaction.created_at)
+        if spawn is None:
+            await interaction.response.send_message(
+                "I couldn't read that time. Use something like `1h 20m`, `45m`, `1:23:45` or `at 21:30`.",
+                ephemeral=True,
+            )
+            return
+        timer = fieldboss.FieldTimer(boss.strip()[:80], zone.strip()[:80], spawn)
+        bot.storage.set_field_timer(interaction.guild_id, timer.boss, timer.zone, int(spawn.timestamp()))
+        await interaction.response.send_message(
+            "Timer added:\n" + _timer_lines(cfg, [timer])[0], allowed_mentions=discord.AllowedMentions.none()
+        )
+
+    @field.command(name="remove", description="Remove a field boss timer.")
+    @app_commands.describe(boss="Boss name, as shown in /events")
+    async def field_remove(interaction: discord.Interaction, boss: str) -> None:
+        removed = bot.storage.remove_field_timer(interaction.guild_id, boss.strip())
+        await interaction.response.send_message(
+            f"Removed **{boss}**." if removed else f"No timer for **{boss}**. See /events for the list.",
+            ephemeral=True,
+        )
+
+    @field_remove.autocomplete("boss")
+    async def field_remove_names(interaction: discord.Interaction, current: str):
+        names = [b for b, _, _ in bot.storage.field_timers(interaction.guild_id)]
+        return [app_commands.Choice(name=n, value=n) for n in names if current.lower() in n.lower()][:25]
+
+    @field_add.autocomplete("boss")
+    async def field_add_names(interaction: discord.Interaction, current: str):
+        return [
+            app_commands.Choice(name=n, value=n)
+            for n in fieldboss.KNOWN_FIELD_BOSSES
+            if current.lower() in n.lower()
+        ][:25]
+
+    bot.tree.add_command(field)
 
     @bot.tree.command(description="Show settings, followed events and when each is next.")
     @app_commands.guild_only()

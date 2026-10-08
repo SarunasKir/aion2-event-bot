@@ -25,6 +25,13 @@ CREATE TABLE IF NOT EXISTS lead_overrides (
     lead_minutes INTEGER NOT NULL,
     PRIMARY KEY (guild_id, event_key)
 );
+CREATE TABLE IF NOT EXISTS field_timers (
+    guild_id INTEGER NOT NULL,
+    boss     TEXT    NOT NULL,
+    zone     TEXT    NOT NULL DEFAULT '',
+    spawn_at INTEGER NOT NULL,
+    PRIMARY KEY (guild_id, boss)
+);
 CREATE TABLE IF NOT EXISTS meta (
     name  TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -124,6 +131,33 @@ class Storage:
                 "ON CONFLICT(guild_id, event_key) DO UPDATE SET lead_minutes = excluded.lead_minutes",
                 (guild_id, event_key, minutes),
             )
+        self.db.commit()
+
+    def set_field_timer(self, guild_id: int, boss: str, zone: str, spawn_at: int) -> None:
+        """Add or replace the timer for a field boss (one pending spawn per boss)."""
+        self.db.execute(
+            "INSERT INTO field_timers (guild_id, boss, zone, spawn_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(guild_id, boss) DO UPDATE SET zone = excluded.zone, spawn_at = excluded.spawn_at",
+            (guild_id, boss, zone, spawn_at),
+        )
+        self.db.commit()
+
+    def field_timers(self, guild_id: int) -> list[tuple[str, str, int]]:
+        """(boss, zone, spawn_at) for a server, soonest first."""
+        return self.db.execute(
+            "SELECT boss, zone, spawn_at FROM field_timers WHERE guild_id = ? ORDER BY spawn_at",
+            (guild_id,),
+        ).fetchall()
+
+    def remove_field_timer(self, guild_id: int, boss: str) -> bool:
+        cur = self.db.execute(
+            "DELETE FROM field_timers WHERE guild_id = ? AND lower(boss) = lower(?)", (guild_id, boss)
+        )
+        self.db.commit()
+        return cur.rowcount > 0
+
+    def prune_field_timers(self, before_ts: int) -> None:
+        self.db.execute("DELETE FROM field_timers WHERE spawn_at < ?", (before_ts,))
         self.db.commit()
 
     def get_meta(self, name: str) -> str | None:

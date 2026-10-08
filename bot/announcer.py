@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from .schedule import EVENTS, REGIONS, Event, occurrences
 from .storage import GuildConfig
@@ -68,3 +68,30 @@ def format_ping(events: list[Event], start: datetime, cfg: GuildConfig) -> str:
     details = sorted({("📍 " if e.category == "boss" else "") + e.description for e in events})
     when = format_time(start, cfg.region, cfg.time_display)
     return f"{mention}{names} {verb} <t:{ts}:R>\n🕒 {when}\n" + "\n".join(f"-# {d}" for d in details)
+
+
+FIELD_LEAD_KEY = "field_bosses"
+
+
+def due_field(
+    cfg: GuildConfig,
+    timers: list[tuple[str, str, int]],
+    now: datetime,
+    lead_overrides: dict[str, int] | None = None,
+) -> list[tuple[str, str, datetime]]:
+    """Field boss timers inside the ping window: (boss, zone, spawn time)."""
+    lead = (lead_overrides or {}).get(FIELD_LEAD_KEY, cfg.lead_minutes)
+    begin, end = now - timedelta(minutes=1), now + timedelta(minutes=lead)
+    out = []
+    for boss, zone, ts in timers:
+        start = datetime.fromtimestamp(ts, timezone.utc)
+        if begin < start <= end:
+            out.append((boss, zone, start))
+    return out
+
+
+def format_field_ping(boss: str, zone: str, start: datetime, cfg: GuildConfig) -> str:
+    ts = int(start.timestamp())
+    mention = f"<@&{cfg.role_id}> " if cfg.role_id else ""
+    where = f"\n-# 📍 {zone} · field boss" if zone else "\n-# Field boss"
+    return f"{mention}**{boss}** spawns <t:{ts}:R>\n🕒 {format_time(start, cfg.region, cfg.time_display)}{where}"

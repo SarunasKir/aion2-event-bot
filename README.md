@@ -1,6 +1,7 @@
 # Aion 2 Event Bot
 
-A Discord bot that pings a role in a channel before the Aion 2 events and world bosses you choose.
+A Discord bot that pings a role in a channel before the Aion 2 events and world bosses you choose,
+and before field bosses you add from a game screenshot.
 
 > @Raiders **Executor Argo**, **Executor Kaira** spawn in 10 minutes
 > 🕒 21:30 your time · 22:30 server time (KST)
@@ -10,6 +11,7 @@ A Discord bot that pings a role in a channel before the Aion 2 events and world 
 - Pick exactly which **events and bosses** to follow. Nothing else gets pinged.
 - Pick **how early** to ping: a server default (10 minutes unless you change it), and if you like, a different time for each event or boss.
 - Show times as **local time** (each reader's own timezone), **game server time**, or both.
+- **Field bosses:** post a screenshot of the in-game respawn timers and the bot reads them and pings before each spawn.
 
 Schedules come from aion2hub's [event timer](https://aion2hub.com/tools/event-timer) and [world boss timers](https://aion2hub.com/tools/world-bosses).
 
@@ -23,10 +25,11 @@ Schedules come from aion2hub's [event timer](https://aion2hub.com/tools/event-ti
 4. [Setup, step 2: run the bot](#step-2-run-the-bot)
 5. [Setup, step 3: configure it in your server](#step-3-configure-it-in-your-server)
 6. [Hosting it 24/7](#hosting-it-247)
-7. [Commands](#commands)
-8. [Updating the schedule](#updating-the-schedule)
-9. [Troubleshooting](#troubleshooting)
-10. [Project layout and development](#project-layout-and-development)
+7. [Field boss timers from screenshots](#field-boss-timers-from-screenshots)
+8. [Commands](#commands)
+9. [Updating the schedule](#updating-the-schedule)
+10. [Troubleshooting](#troubleshooting)
+11. [Project layout and development](#project-layout-and-development)
 
 ---
 
@@ -102,7 +105,8 @@ All times are server time.
 
 **What's not included, and why:**
 - **Hourly minigames** (Nyerk Shooter, Mysterious Track, Hidden Lugi, Up! Up! Up!, Defend Shugo Merchants, Goldrin's Treasure): aion2hub doesn't say what minute of the hour they start.
-- **Zone field bosses** (Altgard, Verteron, Eltnen, Morheim): aion2hub lists their locations but no spawn times.
+- **Zone field bosses** (Altgard, Verteron, Eltnen, Morheim) have no fixed schedule, so they aren't on this list.
+  Add their timers from a screenshot instead: see [Field boss timers from screenshots](#field-boss-timers-from-screenshots).
 - **Weekly Reset** time is an assumption. aion2hub gives only the day (Wednesday), so the bot uses the daily reset hour.
 
 You can add or fix any of these in [`bot/schedule.py`](bot/schedule.py). See [Updating the schedule](#updating-the-schedule).
@@ -171,6 +175,8 @@ When you see `Logged in as …`, the bot is online. It pings only while this pro
 | `DATABASE_PATH` | no | `bot.db` | Where settings are stored |
 | `DEFAULT_LEAD_MINUTES` | no | `10` | Ping time for servers that haven't set one |
 | `SCHEDULE_AUTO_UPDATE` | no | `1` | Set to `0` to turn off the daily aion2hub schedule check |
+| `ANTHROPIC_API_KEY` | for screenshots | none | Lets `/fieldboss screenshot` read images. Without it, use `/fieldboss add` |
+| `FIELD_BOSS_MODEL` | no | `claude-opus-5-5` | Which Claude model reads screenshots |
 
 ---
 
@@ -272,6 +278,58 @@ Your settings are kept, because they live in the database, not in the code.
 
 ---
 
+## Field boss timers from screenshots
+
+Field bosses respawn on their own timers, not on a weekly schedule. The game shows a countdown,
+so the bot takes that from a screenshot and pings before each spawn.
+
+### How it works
+
+1. An admin runs `/fieldboss screenshot` and attaches a screenshot showing field boss respawn timers.
+2. The bot sends the image to Claude, Anthropic's AI model, which reads each boss name and its countdown or spawn time.
+3. Countdowns count from the moment the screenshot was posted. A time of day such as "21:30" is read as **server time**
+   for your region, and if that time has already passed today, it's taken as tomorrow.
+4. The bot posts what it read, so everyone can check it, and saves one timer per boss.
+   A new screenshot or `/fieldboss add` for the same boss replaces its old timer.
+5. It pings the role before each spawn, using the server's ping time. You can give field bosses their own ping time with
+   `/ping-time minutes:5 event:Field bosses (timers you add)`.
+6. Timers are cleared an hour after their spawn time. Post a new screenshot for the next respawn.
+
+> @Raiders **Silent Dartan** spawns in 10 minutes
+> 🕒 21:30 your time · 22:30 server time (KST)
+> 📍 Altgard · field boss
+
+Tips for good results:
+- Crop the screenshot to the timer list. Smaller, sharper images read better.
+- Check the list the bot posts. If a boss or time is wrong, fix it with `/fieldboss add` or drop it with `/fieldboss remove`.
+- All current timers are listed at the bottom of `/events`.
+
+### Setting up screenshot reading
+
+1. Create an API key in the [Claude Console](https://platform.claude.com/) (Settings → API keys) and add some credit.
+2. Add it to `.env` as `ANTHROPIC_API_KEY=...` and restart the bot.
+
+Each screenshot is one request to Claude. With the default model, a typical screenshot costs around a cent or less.
+To keep costs predictable, the `/fieldboss` commands are limited to **Manage Server** by default.
+To let a raid-leader role use them, go to **Server Settings → Integrations → your bot → /fieldboss** and add that role.
+
+Without an API key, everything else still works. `/fieldboss screenshot` just says it isn't set up,
+and you can type timers in with `/fieldboss add`.
+
+### Typing timers in by hand
+
+`/fieldboss add boss:<name> spawns_in:<time> [zone:<zone>]`, where the time is any of:
+
+| You type | Meaning |
+|---|---|
+| `1h 20m`, `45m`, `2h`, `90s` | Time left until the spawn |
+| `1:23:45` | Time left, as hours:minutes:seconds |
+| `at 21:30` | Spawn at 21:30 server time (the next 21:30 coming up) |
+
+The boss name suggests the known field bosses as you type, but any name works.
+
+---
+
 ## Commands
 
 | Command | Who | What it does |
@@ -283,11 +341,16 @@ Your settings are kept, because they live in the database, not in the code.
 | `/ping-time minutes event` | Manage Server | Gives one event or boss, or a shortcut group, its own ping time |
 | `/ping-time event` | Manage Server | With no minutes, puts that event back on the server-wide time |
 | `/schedule-check` | Manage Server | Checks aion2hub now and applies any changed times |
+| `/fieldboss screenshot image` | Manage Server* | Reads field boss timers from a screenshot and pings before each spawn |
+| `/fieldboss add boss spawns_in [zone]` | Manage Server* | Adds or replaces one field boss timer by hand |
+| `/fieldboss remove boss` | Manage Server* | Removes a field boss timer |
 | `/time-display mode` | Manage Server | Shows times in pings as **local time** (each reader's own timezone), **server time** (the game clock), or **both** (default) |
 | `/events` | Everyone | Shows settings, what's followed, and when each event or boss is next |
 | `/test-ping` | Manage Server | Posts a sample ping in the configured channel |
 
-Command replies are only visible to you. Only the real pings appear publicly.
+\* Server admins can open these to another role under Server Settings → Integrations.
+
+Most command replies are only visible to you. Field boss replies are public, so everyone can see the timers.
 
 ---
 
@@ -335,6 +398,8 @@ Discord allows at most 25 choices per option. There are 18 now: 15 events and bo
 | A ping posts but nobody is notified | The role isn't mentionable and the bot lacks "Mention All Roles". `/setup` warns about this. |
 | No pings at all | Run `/events`: check that the channel is set, items have ✅, and they show a "next" time. "Not in this region" means that content doesn't exist on your server's region. |
 | `/schedule-check` says it couldn't read the boss page | aion2hub changed its page layout. Times stay as they were. Update `bot/watcher.py` or edit `bot/schedule.py` by hand. |
+| `/fieldboss screenshot` says it isn't set up | Add `ANTHROPIC_API_KEY` to `.env` and restart the bot. |
+| A field boss time is off | Check the bot's list after posting. Countdowns start when the screenshot is posted, so post it right after taking it. Fix one with `/fieldboss add`. |
 | Pings arrive at the wrong time | Check the region in `/setup`. Korea and Taiwan are an hour apart. |
 | The bot can't post in the channel | Give the bot View Channel and Send Messages in that channel's permissions. |
 
@@ -347,9 +412,10 @@ bot/
   main.py        Discord client, slash commands and the 20-second check loop
   announcer.py   Decides what is due now, and formats the ping message
   schedule.py    Event and boss schedule data, plus time calculations
-  storage.py     SQLite: server settings, followed items, ping times, sent pings, saved schedule updates
+  storage.py     SQLite: server settings, followed items, ping times, sent pings, schedule updates, field timers
   watcher.py     Daily aion2hub check: reads the pages, finds changed times, applies them
-tests/           pytest tests for the schedule, ping windows, storage and the aion2hub check
+  fieldboss.py   Field boss timers: reads screenshots with Claude, and parses typed-in times
+tests/           pytest tests for the schedule, ping windows, storage, aion2hub check and field bosses
 deploy/          systemd service file
 Dockerfile       Container image
 ```
