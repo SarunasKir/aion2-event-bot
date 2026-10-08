@@ -1,0 +1,19 @@
+# systemd service: keeps the bot running and restarts it after crashes or reboots.
+# Install:  sudo cp deploy/aion2-bot.service /etc/systemd/system/
+#           sudo systemctl daemon-reload && sudo systemctl enable --now aion2-bot
+# Edit User and the paths below if your user or folder differ.
+[Unit]
+Description=Aion 2 event Discord bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/aion2-event-bot
+EnvironmentFile=/home/ubuntu/aion2-event-bot/.env
+ExecStart=/home/ubuntu/aion2-event-bot/.venv/bin/python -m bot.main
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
