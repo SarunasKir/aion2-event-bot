@@ -32,9 +32,25 @@ Schedules come from aion2hub's [event timer](https://aion2hub.com/tools/event-ti
 
 ## How the bot works
 
-**Where the times come from.** aion2hub has no public API. Its timers are calculated in your browser from a fixed weekly schedule.
-This bot keeps that same schedule as data in [`bot/schedule.py`](bot/schedule.py), so it never has to download anything from the site.
-If aion2hub goes down, the bot keeps working.
+**Where the times come from.** aion2hub datamines the times from the game client and builds them into its pages as a fixed weekly schedule.
+It has no public API. This bot ships with the same schedule as data in [`bot/schedule.py`](bot/schedule.py).
+
+**Daily schedule check.** Once a day, and when it starts, the bot reads aion2hub's
+[world boss](https://aion2hub.com/tools/world-bosses) and [event timer](https://aion2hub.com/tools/event-timer) pages.
+It looks for phrases like "Wed & Sat · 22:30 server" or "Every 4h from 01:00 server" next to each event or boss name.
+If a time differs from what the bot has, the bot:
+1. switches to the new time straight away,
+2. saves it in the database, so it survives restarts, and
+3. posts a short notice in each server's announcement channel, without pinging anyone. For example:
+   "📅 aion2hub updated its schedule: **Turncoat Ducal** (Korea): Wed & Sat 22:30 → Tue & Fri 21:00".
+
+Safety rules:
+- Only times for events and bosses the bot already knows are updated. New bosses still need adding to `schedule.py` by hand.
+- If the site is down, or its layout changed so that fewer than 5 boss times can be read, nothing changes and the bot keeps its current times.
+- Bosses and events change together only when each one is read clearly. Anything unreadable keeps its current time.
+
+Admins can run `/schedule-check` to check right away and see what changed. To turn the daily check off, set `SCHEDULE_AUTO_UPDATE=0`.
+If aion2hub goes away entirely, the bot keeps working with the last times it knew.
 
 **Regions and timezones.** Every event and boss is defined in *server time* for each region:
 
@@ -154,6 +170,7 @@ When you see `Logged in as …`, the bot is online. It pings only while this pro
 | `DISCORD_TOKEN` | yes | none | The bot token from step 1 |
 | `DATABASE_PATH` | no | `bot.db` | Where settings are stored |
 | `DEFAULT_LEAD_MINUTES` | no | `10` | Ping time for servers that haven't set one |
+| `SCHEDULE_AUTO_UPDATE` | no | `1` | Set to `0` to turn off the daily aion2hub schedule check |
 
 ---
 
@@ -265,6 +282,7 @@ Your settings are kept, because they live in the database, not in the code.
 | `/ping-time minutes` | Manage Server | Sets the server-wide ping time, 0 to 120 minutes (0 = at start) |
 | `/ping-time minutes event` | Manage Server | Gives one event or boss, or a shortcut group, its own ping time |
 | `/ping-time event` | Manage Server | With no minutes, puts that event back on the server-wide time |
+| `/schedule-check` | Manage Server | Checks aion2hub now and applies any changed times |
 | `/time-display mode` | Manage Server | Shows times in pings as **local time** (each reader's own timezone), **server time** (the game clock), or **both** (default) |
 | `/events` | Everyone | Shows settings, what's followed, and when each event or boss is next |
 | `/test-ping` | Manage Server | Posts a sample ping in the configured channel |
@@ -275,7 +293,8 @@ Command replies are only visible to you. Only the real pings appear publicly.
 
 ## Updating the schedule
 
-Everything the bot knows about times is in [`bot/schedule.py`](bot/schedule.py). Each entry gives:
+The daily check keeps known times up to date by itself (see [How the bot works](#how-the-bot-works)).
+To add something new, or to fix a time the check can't read, edit [`bot/schedule.py`](bot/schedule.py). Each entry gives:
 - **key**: an internal id. Don't rename keys that servers already follow.
 - **name**: what Discord shows.
 - **description**: a short line under the ping (for bosses, the location).
@@ -315,6 +334,7 @@ Discord allows at most 25 choices per option. There are 18 now: 15 events and bo
 | "Set DISCORD_TOKEN" on start | `.env` wasn't loaded, or the token line is empty. |
 | A ping posts but nobody is notified | The role isn't mentionable and the bot lacks "Mention All Roles". `/setup` warns about this. |
 | No pings at all | Run `/events`: check that the channel is set, items have ✅, and they show a "next" time. "Not in this region" means that content doesn't exist on your server's region. |
+| `/schedule-check` says it couldn't read the boss page | aion2hub changed its page layout. Times stay as they were. Update `bot/watcher.py` or edit `bot/schedule.py` by hand. |
 | Pings arrive at the wrong time | Check the region in `/setup`. Korea and Taiwan are an hour apart. |
 | The bot can't post in the channel | Give the bot View Channel and Send Messages in that channel's permissions. |
 
@@ -327,8 +347,9 @@ bot/
   main.py        Discord client, slash commands and the 20-second check loop
   announcer.py   Decides what is due now, and formats the ping message
   schedule.py    Event and boss schedule data, plus time calculations
-  storage.py     SQLite: server settings, followed items, ping times, sent pings
-tests/           pytest tests for the schedule, ping windows and storage
+  storage.py     SQLite: server settings, followed items, ping times, sent pings, saved schedule updates
+  watcher.py     Daily aion2hub check: reads the pages, finds changed times, applies them
+tests/           pytest tests for the schedule, ping windows, storage and the aion2hub check
 deploy/          systemd service file
 Dockerfile       Container image
 ```

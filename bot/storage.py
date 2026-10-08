@@ -25,6 +25,10 @@ CREATE TABLE IF NOT EXISTS lead_overrides (
     lead_minutes INTEGER NOT NULL,
     PRIMARY KEY (guild_id, event_key)
 );
+CREATE TABLE IF NOT EXISTS meta (
+    name  TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS sent (
     guild_id  INTEGER NOT NULL,
     event_key TEXT    NOT NULL,
@@ -120,6 +124,18 @@ class Storage:
                 "ON CONFLICT(guild_id, event_key) DO UPDATE SET lead_minutes = excluded.lead_minutes",
                 (guild_id, event_key, minutes),
             )
+        self.db.commit()
+
+    def get_meta(self, name: str) -> str | None:
+        row = self.db.execute("SELECT value FROM meta WHERE name = ?", (name,)).fetchone()
+        return row[0] if row else None
+
+    def set_meta(self, name: str, value: str) -> None:
+        self.db.execute(
+            "INSERT INTO meta (name, value) VALUES (?, ?) "
+            "ON CONFLICT(name) DO UPDATE SET value = excluded.value",
+            (name, value),
+        )
         self.db.commit()
 
     def mark_sent(self, guild_id: int, event_key: str, starts_at: int) -> bool:

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from datetime import datetime, timedelta, timezone
 
+import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import tasks
@@ -13,6 +15,7 @@ from discord.ext import tasks
 from .announcer import TIME_DISPLAYS, due, format_ping, format_time
 from .schedule import EVENTS, REGION_LABELS, REGIONS, next_occurrence
 from .storage import GuildConfig, Storage
+from . import watcher
 
 log = logging.getLogger("aion2bot")
 
@@ -27,6 +30,7 @@ EVENT_CHOICES = [
 TIME_DISPLAY_CHOICES = [app_commands.Choice(name=label, value=key) for key, label in TIME_DISPLAYS.items()]
 REGION_CHOICES = [app_commands.Choice(name=label, value=key) for key, label in REGION_LABELS.items()]
 DEFAULT_LEAD = int(os.getenv("DEFAULT_LEAD_MINUTES", "10"))
+AUTO_UPDATE = os.getenv("SCHEDULE_AUTO_UPDATE", "1") != "0"
 
 
 class EventBot(discord.Client):
@@ -36,9 +40,57 @@ class EventBot(discord.Client):
         self.storage = storage
 
     async def setup_hook(self) -> None:
+        saved = self.storage.get_meta("schedule")
+        if saved:
+            watcher.apply(watcher.from_json(json.loads(saved)))
+            log.info("Loaded schedule updates saved from aion2hub")
         register_commands(self)
         await self.tree.sync()
         self.check_events.start()
+        if AUTO_UPDATE:
+            self.refresh_schedule.start()
+
+    async def update_schedule(self) -> tuple[list[watcher.Change], list[str], list[str]]:
+        """Read aion2hub, apply and save any changed times. Returns (changes, problems, versions)."""
+        async with aiohttp.ClientSession() as session:
+            boss_html = await watcher.fetch(session, watcher.BOSS_URL)
+            event_html = await watcher.fetch(session, watcher.EVENT_URL)
+        parsed, problems = watcher.read_pages(boss_html, event_html)
+        versions = watcher.source_versions(watcher.page_text(boss_html)) if boss_html else []
+        changes = watcher.diff(parsed)
+        if changes:
+            watcher.apply(parsed)
+            saved = watcher.from_json(json.loads(self.storage.get_meta("schedule") or "[]"))
+            saved.update(parsed)
+            self.storage.set_meta("schedule", json.dumps(watcher.to_json(saved)))
+        self.storage.set_meta("schedule_checked_at", datetime.now(timezone.utc).isoformat())
+        for p in problems:
+            log.warning("Schedule check: %s", p)
+        log.info("Schedule check: %d item(s) read, %d changed", len(parsed), len(changes))
+        return changes, problems, versions
+
+    @tasks.loop(hours=24)
+    async def refresh_schedule(self) -> None:
+        changes, _, versions = await self.update_schedule()
+        if not changes:
+            return
+        text = (
+            "📅 **aion2hub updated its schedule**, so these times changed:\n"
+            + "\n".join(f"• {c.line()}" for c in changes)
+            + (f"\n-# Source data: {', '.join(versions)}" if versions else "")
+        )
+        for cfg in self.storage.all_configs():
+            channel = self.get_channel(cfg.channel_id)
+            if channel is None:
+                continue
+            try:
+                await channel.send(text, allowed_mentions=discord.AllowedMentions.none())
+            except discord.HTTPException:
+                log.exception("Could not post schedule update in guild %s", cfg.guild_id)
+
+    @refresh_schedule.before_loop
+    async def before_refresh(self) -> None:
+        await self.wait_until_ready()
 
     async def on_ready(self) -> None:
         log.info("Logged in as %s in %d server(s)", self.user, len(self.guilds))
@@ -231,6 +283,23 @@ def register_commands(bot: EventBot) -> None:
             f"Pings now show **{mode.name.lower()}**.\n\n" + _status_text(bot, interaction.guild_id),
             ephemeral=True,
         )
+
+    @bot.tree.command(name="schedule-check", description="Check aion2hub now for changed event and boss times.")
+    @admin
+    @app_commands.guild_only()
+    async def schedule_check(interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        changes, problems, versions = await bot.update_schedule()
+        if changes:
+            lines = ["Updated these times from aion2hub:"] + [f"• {c.line()}" for c in changes]
+        else:
+            lines = ["No time changes: the bot already matches aion2hub."]
+        lines += [f"⚠️ {p}" for p in problems]
+        if versions:
+            lines.append(f"-# Source data: {', '.join(versions)}")
+        if not AUTO_UPDATE:
+            lines.append("-# The daily automatic check is turned off (SCHEDULE_AUTO_UPDATE=0).")
+        await interaction.followup.send("\n".join(lines), ephemeral=True)
 
     @bot.tree.command(description="Show settings, followed events and when each is next.")
     @app_commands.guild_only()
