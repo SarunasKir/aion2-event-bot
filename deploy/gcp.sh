@@ -98,6 +98,13 @@ RestartSec=10
 [Install]
 WantedBy=multi-user.target
 UNIT
+# `sudo aion2-mcp` starts the MCP server, so Claude on your computer can manage the bot over SSH.
+cat > /usr/local/bin/aion2-mcp <<WRAPPER
+#!/bin/sh
+cd $DIR/app && exec sudo -u aion2bot -H $DIR/venv/bin/python -m bot.mcp_server --env $DIR/.env
+WRAPPER
+chmod 755 /usr/local/bin/aion2-mcp
+
 systemctl daemon-reload
 systemctl enable -q aion2-bot
 systemctl restart aion2-bot
