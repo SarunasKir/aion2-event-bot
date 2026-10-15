@@ -2,3 +2,4 @@ discord.py>=2.5,<3
 aiohttp>=3.9
 anthropic>=1.0
 Pillow>=10.1
+mcp>=2.2,<3
