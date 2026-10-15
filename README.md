@@ -253,6 +253,8 @@ Prices and free tiers below are a guide, so check the current terms when you sig
    and saved only on the VM.
 
 Run the same command again to update the bot to the latest code; press Enter at the prompts to keep the saved keys.
+If you connected Claude to the bot (see [Control the bot from Claude](#control-the-bot-from-claude)), quit and reopen
+Claude Desktop after an update so it picks up new tools.
 To pick a different zone or VM name, set them first, like `ZONE=us-east1-b VM=my-bot`, before `bash`.
 Live logs: `gcloud compute ssh aion2-bot --zone us-central1-a -- sudo journalctl -u aion2-bot -f`.
 
@@ -388,7 +390,12 @@ The bot replies with a preview and turns images on. Run it again any time to cha
 left or centered text, a border, a background decoration and an optional tagline. That needs `ANTHROPIC_API_KEY`, and it
 happens once per style. Each ping's image is then drawn by the bot itself in well under a second, so pings cost nothing
 extra and never wait on Claude. With `use_as_background:True` your example image itself sits behind the text, tinted so
-the text stays readable; this one works without an API key too.
+the text stays readable; this one works without an API key too. Without a key, give only `example` and
+`use_as_background:True` and leave `instructions` out. If the bot answers "Designing a style needs ANTHROPIC_API_KEY",
+`use_as_background` wasn't set to True or `instructions` had text in it.
+
+The image is a wide 3:1 banner, so a square or tall picture is cropped to its middle strip. Text near the top or bottom
+of your picture won't show.
 
 The image shows the boss name, the location and the spawn time in **server time** (an image can't show each reader's own
 time). The ping text above it still has the usual Discord timestamps.
@@ -462,10 +469,29 @@ on the VM is opened to the internet, and only people who can SSH into your Googl
      ```
      The address only changes if the VM is stopped and started again. Edit the config with Claude Desktop fully quit
      (tray icon → Quit), or it may write its old copy back.
+
+     If Claude Desktop came from the Microsoft Store, its config file isn't in `%APPDATA%\Claude` but in
+     `%LOCALAPPDATA%\Packages\Claude_<id>\LocalCache\Roaming\Claude\claude_desktop_config.json`. Edit Config opens
+     the right one.
    - **Claude Code:**
      ```bash
      claude mcp add aion2-bot -- gcloud compute ssh aion2-bot --zone us-central1-a --project YOUR_PROJECT_ID --quiet --command "sudo aion2-mcp"
      ```
+
+### If Claude can't connect
+
+Settings → Developer in Claude Desktop shows the server's state. "Connection closed" right after start means the SSH
+command exited. Run the same command by hand with a test message to see why. In PowerShell:
+```powershell
+& { '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}'; Start-Sleep 10 } | ssh -i "$env:USERPROFILE\.ssh\google_compute_engine" you@VM_ADDRESS "sudo aion2-mcp"
+```
+(on macOS or Linux: `(echo '<same JSON>'; sleep 10) | gcloud compute ssh aion2-bot --zone us-central1-a --command "sudo aion2-mcp"`).
+A working server prints one line with `"serverInfo":{"name":"aion2-event-bot"`. Common causes:
+
+- Nothing printed when using `gcloud` on Windows: use the Windows `ssh` entry above.
+- `UNPROTECTED PRIVATE KEY FILE` / `bad permissions`: run the `icacls` command above.
+- `Permission denied (publickey)`: run step 2 again so gcloud adds your key to the VM, and check the user name before `@`.
+- New tools missing after an update: quit and reopen Claude Desktop.
 
 ### Connecting Claude to a bot on your own computer
 
