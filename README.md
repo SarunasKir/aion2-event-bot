@@ -237,6 +237,24 @@ Prices and free tiers below are a guide, so check the current terms when you sig
 | Hetzner Cloud small server | about €4 a month | medium |
 | Railway | about $5 a month | lowest |
 
+### Google Cloud in one command
+
+[`deploy/gcp.sh`](deploy/gcp.sh) creates a free-tier e2-micro VM and installs the bot on it as a service.
+
+1. In the [Google Cloud console](https://console.cloud.google.com/), pick or create a project with billing turned on.
+   The free tier needs a billing account, but one e2-micro VM in `us-west1`, `us-central1` or `us-east1` with a 30 GB
+   standard disk falls within it. Setting a small budget alert under Billing → Budgets is a good safety net.
+2. Open Cloud Shell (the `>_` button at the top) and run:
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/SarunasKir/aion2-event-bot/main/deploy/gcp.sh | bash
+   ```
+3. Paste the Discord token when asked, and the Anthropic API key if you have one. They are typed into Cloud Shell
+   and saved only on the VM.
+
+Run the same command again to update the bot to the latest code; press Enter at the prompts to keep the saved keys.
+To pick a different zone or VM name, set them first, like `ZONE=us-east1-b VM=my-bot`, before `bash`.
+Live logs: `gcloud compute ssh aion2-bot --zone us-central1-a -- sudo journalctl -u aion2-bot -f`.
+
 ### Linux server (Oracle, Google Cloud, Hetzner or a Raspberry Pi)
 
 1. Create an Ubuntu server and connect to it with SSH.
