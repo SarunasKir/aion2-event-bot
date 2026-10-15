@@ -80,6 +80,19 @@ def format_ping(events: list[Event], start: datetime, cfg: GuildConfig, role_id=
     return f"{mention}{names} {verb} <t:{ts}:R>\n🕒 {when}\n" + "\n".join(f"-# {d}" for d in details) + f"\n-# {links}"
 
 
+def card_time(start: datetime, region: str, now: datetime) -> str:
+    """Spawn time for a boss image. Images can't show each reader's local time, so this uses server time."""
+    server_tz = REGIONS[region]
+    minutes = round((start - now).total_seconds() / 60)
+    if minutes <= 0:
+        lead = "Spawning now"
+    elif minutes < 60:
+        lead = f"Spawns in {minutes} min"
+    else:
+        lead = f"Spawns in {minutes // 60}h" + (f" {minutes % 60}m" if minutes % 60 else "")
+    return f"{lead} · {start.astimezone(server_tz):%H:%M} server time ({server_tz.tzname(None)})"
+
+
 def format_start_ping(names: list[str], cfg: GuildConfig, role_id=_DEFAULT) -> str:
     """The second, short ping when things start."""
     role_id = cfg.role_id if role_id is _DEFAULT else role_id

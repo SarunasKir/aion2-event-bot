@@ -29,11 +29,12 @@ Schedules come from aion2hub's [event timer](https://aion2hub.com/tools/event-ti
 5. [Setup, step 3: configure it in your server](#step-3-configure-it-in-your-server)
 6. [Hosting it 24/7](#hosting-it-247)
 7. [Field boss timers from screenshots](#field-boss-timers-from-screenshots)
-8. [Server options](#server-options)
-9. [Commands](#commands)
-10. [Updating the schedule](#updating-the-schedule)
-11. [Troubleshooting](#troubleshooting)
-12. [Project layout and development](#project-layout-and-development)
+8. [Boss images](#boss-images)
+9. [Server options](#server-options)
+10. [Commands](#commands)
+11. [Updating the schedule](#updating-the-schedule)
+12. [Troubleshooting](#troubleshooting)
+13. [Project layout and development](#project-layout-and-development)
 
 ---
 
@@ -133,7 +134,7 @@ You can add or fix any of these in [`bot/schedule.py`](bot/schedule.py). See [Up
 4. Open **OAuth2 → URL Generator**:
    - Under **Scopes**, tick `bot` and `applications.commands`.
    - Under **Bot Permissions**, tick `View Channels`, `Send Messages` and `Mention @everyone, @here and All Roles`.
-     Also tick `Manage Roles` if you'll use the `/role-menu` buttons.
+     Also tick `Manage Roles` if you'll use the `/role-menu` buttons, and `Attach Files` if you'll use `/boss-image`.
 5. Copy the generated URL at the bottom, open it, choose your server and click **Authorize**.
 
 The bot now appears in your member list, offline. It comes online once you run it in step 2.
@@ -187,8 +188,8 @@ When you see `Logged in as …`, the bot is online. It pings only while this pro
 | `DATABASE_PATH` | no | `bot.db` | Where settings are stored |
 | `DEFAULT_LEAD_MINUTES` | no | `10` | Ping time for servers that haven't set one |
 | `SCHEDULE_AUTO_UPDATE` | no | `1` | Set to `0` to turn off the daily aion2hub schedule check |
-| `ANTHROPIC_API_KEY` | for screenshots | none | Lets `/fieldboss screenshot` read images. Without it, use `/fieldboss add` |
-| `FIELD_BOSS_MODEL` | no | `claude-opus-5-5` | Which Claude model reads screenshots |
+| `ANTHROPIC_API_KEY` | for screenshots and image styles | none | Lets `/fieldboss screenshot` read images and `/boss-image style` design a look. Without it, use `/fieldboss add` |
+| `FIELD_BOSS_MODEL` | no | `claude-opus-5-5` | Which Claude model reads screenshots and designs image styles |
 | `HEALTH_TIMEOUT` | no | `300` | Seconds without a check before the bot restarts itself |
 | `HEALTH_FILE` | no | `/tmp/aion2bot.heartbeat` | Heartbeat file read by `python -m bot.health` (the Docker health check) |
 
@@ -241,7 +242,7 @@ Prices and free tiers below are a guide, so check the current terms when you sig
 1. Create an Ubuntu server and connect to it with SSH.
 2. Install Python and git, then set up the bot:
    ```bash
-   sudo apt update && sudo apt install -y python3-venv git
+   sudo apt update && sudo apt install -y python3-venv git fonts-dejavu-core
    git clone https://github.com/SarunasKir/aion2-event-bot.git
    cd aion2-event-bot
    python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
@@ -350,6 +351,37 @@ The boss name suggests the known field bosses as you type, but any name works.
 
 ---
 
+## Boss images
+
+World boss and field boss pings can include a picture, drawn in a style you choose. Event pings stay text only.
+
+![A sample boss image](docs/boss-image-example.png)
+
+**Pick a style: `/boss-image style`.** Describe the look, attach an example image whose style to copy, or both:
+```
+/boss-image style instructions:dark red and gold, gothic, glowing border, tagline "Legion, assemble!"
+/boss-image style example:<a banner or screenshot you like>
+/boss-image style example:<your guild banner> use_as_background:True
+```
+The bot replies with a preview and turns images on. Run it again any time to change the look.
+
+**How it works.** When you set a style, Claude turns your description or example into colors, a font (classic or modern),
+left or centered text, a border, a background decoration and an optional tagline. That needs `ANTHROPIC_API_KEY`, and it
+happens once per style. Each ping's image is then drawn by the bot itself in well under a second, so pings cost nothing
+extra and never wait on Claude. With `use_as_background:True` your example image itself sits behind the text, tinted so
+the text stays readable; this one works without an API key too.
+
+The image shows the boss name, the location and the spawn time in **server time** (an image can't show each reader's own
+time). The ping text above it still has the usual Discord timestamps.
+
+**Other commands.** `/boss-image off` stops adding images and keeps your style. `/boss-image on` turns them back on
+(with the default style above if you never set one). `/boss-image preview` shows the current look.
+
+The bot needs **Attach Files** in the ping channel. Without it, pings still go out without the image and the admins get one
+warning.
+
+---
+
 ## Server options
 
 All of these are optional and per server. `/events` shows which are on.
@@ -403,6 +435,8 @@ and every ping links to the matching aion2hub page.
 | `/start-ping enabled` | Manage Server | Also ping when things start |
 | `/digest enabled` | Manage Server | Daily summary after the reset |
 | `/auto-delete [minutes]` | Manage Server | Deletes pings that many minutes after the start |
+| `/boss-image style [instructions] [example] [use_as_background]` | Manage Server | Adds an image to boss pings, styled from a description or example image |
+| `/boss-image on`, `off`, `preview` | Manage Server | Turns boss images on or off, or shows the current look |
 | `/events` | Everyone | Shows settings, what's followed, and when each event or boss is next |
 | `/test-ping` | Manage Server | Posts a sample ping in the configured channel |
 
@@ -456,7 +490,8 @@ Discord allows at most 25 choices per option. There are 18 now: 15 events and bo
 | A ping posts but nobody is notified | The role isn't mentionable and the bot lacks "Mention All Roles". `/setup` warns about this. |
 | No pings at all | Run `/events`: check that the channel is set, items have ✅, and they show a "next" time. "Not in this region" means that content doesn't exist on your server's region. |
 | `/schedule-check` says it couldn't read the boss page | aion2hub changed its page layout. Times stay as they were. Update `bot/watcher.py` or edit `bot/schedule.py` by hand. |
-| `/fieldboss screenshot` says it isn't set up | Add `ANTHROPIC_API_KEY` to `.env` and restart the bot. |
+| `/fieldboss screenshot` or `/boss-image style` says it isn't set up | Add `ANTHROPIC_API_KEY` to `.env` and restart the bot. |
+| Boss pings have no image | Run `/boss-image preview` to check images are on, and give the bot **Attach Files** in the ping channel. |
 | A field boss time is off | Check the bot's list after posting. Countdowns start when the screenshot is posted, so post it right after taking it. Fix one with `/fieldboss add`. |
 | Notify-me buttons say "I can't change that role" | Give the bot **Manage Roles**, and drag its role above the ping roles in Server Settings → Roles. |
 | The bot sent me a DM about a channel | It couldn't post pings there. Fix the channel or its permissions; pings resume on their own. |
@@ -472,12 +507,13 @@ bot/
   main.py        Discord client, slash commands and the 20-second check loop
   announcer.py   Decides what is due now, and formats the ping message
   schedule.py    Event and boss schedule data, plus time calculations
-  storage.py     SQLite: server settings, routes, followed items, ping times, sent pings, schedule updates, field timers
+  storage.py     SQLite: server settings, routes, followed items, ping times, sent pings, schedule updates, field timers, image styles
   views.py       Buttons and forms: Notify-me roles, field boss Killed, screenshot Save/Discard
   health.py      Watchdog that restarts a frozen bot, and the Docker health check
   watcher.py     Daily aion2hub check: reads the pages, finds changed times, applies them
   fieldboss.py   Field boss timers: reads screenshots with Claude, and parses typed-in times
-tests/           pytest tests for the schedule, pings, delivery, options, aion2hub check and field bosses
+  cards.py       Boss images: draws them with Pillow, and designs styles with Claude
+tests/           pytest tests for the schedule, pings, delivery, options, aion2hub check, field bosses and boss images
 deploy/          systemd service file
 Dockerfile       Container image
 ```

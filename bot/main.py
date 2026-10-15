@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import io
 import json
 import logging
 import os
@@ -16,6 +18,7 @@ from discord.ext import tasks
 from .announcer import (
     FIELD_LEAD_KEY,
     TIME_DISPLAYS,
+    card_time,
     due,
     due_field,
     format_digest,
@@ -29,7 +32,7 @@ from .announcer import (
 )
 from .schedule import EVENTS, REGION_LABELS, REGIONS, next_occurrence
 from .storage import GuildConfig, Storage
-from . import fieldboss, health, views, watcher
+from . import cards, fieldboss, health, views, watcher
 
 log = logging.getLogger("aion2bot")
 
@@ -199,7 +202,7 @@ class EventBot(discord.Client):
         followed = self.storage.followed(gid)
         out: list[Outgoing] = []
 
-        def add(keys, category, start, text_for_role, view=None):
+        def add(keys, category, start, text_for_role, view=None, card=None):
             pending = [k for k in keys if not self.storage.was_sent(gid, *k)]
             if not pending:
                 return
@@ -209,7 +212,7 @@ class EventBot(discord.Client):
                 return
             channel_id, role_id = self._target(cfg, category)
             delete_at = int(start.timestamp()) + cfg.delete_after * 60 if cfg.delete_after is not None else None
-            out.append(Outgoing(pending, channel_id, text_for_role(role_id), view, delete_at, role_id))
+            out.append(Outgoing(pending, channel_id, text_for_role(role_id), view, delete_at, role_id, card))
 
         # Advance pings, one message per start time and category
         groups: dict[tuple[datetime, str], list] = {}
@@ -217,12 +220,17 @@ class EventBot(discord.Client):
             groups.setdefault((start, event.category), []).append(event)
         for (start, category), events in groups.items():
             keys = [(e.key, int(start.timestamp())) for e in events]
-            add(keys, category, start, lambda r, ev=events, st=start: format_ping(ev, st, cfg, r))
+            card = None
+            if category == "boss":
+                card = Card("World boss", " · ".join(e.name for e in events),
+                            " · ".join(sorted({e.description for e in events})), start)
+            add(keys, category, start, lambda r, ev=events, st=start: format_ping(ev, st, cfg, r), card=card)
 
         field = due_field(cfg, self.storage.field_timers(gid), now, overrides)
         for boss, zone, start in field:
             add([(f"field:{boss.lower()}|{zone.lower()}", int(start.timestamp()))], "field", start,
-                lambda r, b=boss, z=zone, st=start: format_field_ping(b, z, st, cfg, r), views.killed_view(boss, zone))
+                lambda r, b=boss, z=zone, st=start: format_field_ping(b, z, st, cfg, r), views.killed_view(boss, zone),
+                Card("Field boss", boss, zone, start))
 
         if cfg.start_ping:
             starting = replace(cfg, lead_minutes=0)
@@ -252,6 +260,7 @@ class EventBot(discord.Client):
         messages = self._messages(cfg, now)
         if not messages:
             return
+        card_style = self.storage.card_style(cfg.guild_id)
         for msg in messages:
             channel = guild.get_channel(msg.channel_id)
             if channel is None:
@@ -274,8 +283,11 @@ class EventBot(discord.Client):
             # undo the mark if the send fails, so the next check retries it.
             for key, ts in msg.keys:
                 self.storage.mark_sent(cfg.guild_id, key, ts)
+            image = await self._card_file(guild, channel, cfg, msg.card, card_style, now)
             try:
                 kwargs = {"view": msg.view} if msg.view is not None else {}
+                if image is not None:
+                    kwargs["file"] = image
                 posted = await channel.send(
                     msg.text,
                     allowed_mentions=_only_role(msg.role_id),
@@ -302,6 +314,29 @@ class EventBot(discord.Client):
             if msg.delete_at is not None and posted is not None:
                 self.storage.add_posted(channel.id, posted.id, msg.delete_at)
             self._clear_warning(guild.id, channel.id)
+            if image is not None and self.storage.get_meta(f"warned:{guild.id}:no_attach:{channel.id}"):
+                self.storage.set_meta(f"warned:{guild.id}:no_attach:{channel.id}", "")
+
+    async def _card_file(self, guild, channel, cfg: GuildConfig, card: "Card | None", saved, now: datetime):
+        """The boss image for a ping, or None when images are off, not allowed here, or fail to draw."""
+        if card is None or saved is None or not saved[0]:
+            return None
+        if not getattr(channel.permissions_for(guild.me), "attach_files", False):
+            await self._warn_admins(
+                guild, f"no_attach:{channel.id}",
+                f"Boss images are on, but I can't attach files in {channel.mention} on **{guild.name}**, "
+                "so boss pings there go out without the image. Give me Attach Files there.",
+            )
+            return None
+        try:
+            style = cards.CardStyle.from_dict(json.loads(saved[1] or "{}"))
+            png = await asyncio.to_thread(
+                cards.render, style, card.kind, card.title, card_time(card.start, cfg.region, now), card.detail, saved[2]
+            )
+        except Exception:  # a broken image must never stop the ping itself
+            log.exception("Couldn't draw the boss image for guild %s", cfg.guild_id)
+            return None
+        return discord.File(io.BytesIO(png), filename=cards.FILENAME)
 
     async def _delete_old_pings(self, now: datetime) -> None:
         for channel_id, message_id in self.storage.posted_due(int(now.timestamp())):
@@ -366,6 +401,15 @@ def _ping_role_ids(bot: "EventBot", guild_id: int) -> list[int]:
 
 
 @dataclass
+class Card:
+    """What to draw on a boss ping's image."""
+    kind: str  # label, like "World boss"
+    title: str  # boss name(s)
+    detail: str  # location
+    start: datetime
+
+
+@dataclass
 class Outgoing:
     keys: list[tuple[str, int]]  # (sent key, start timestamp) this message covers
     channel_id: int | None
@@ -373,6 +417,7 @@ class Outgoing:
     view: discord.ui.View | None
     delete_at: int | None
     role_id: int | None  # the only thing this message may mention
+    card: Card | None = None  # boss image to attach, if the server turned images on
 
 
 def _fit(text: str, limit: int = 2000) -> str:
@@ -421,6 +466,7 @@ def _status_text(bot: EventBot, guild_id: int) -> str:
         f"**Ping at start too:** {'on' if cfg.start_ping else 'off'} (/start-ping)"
         f" · **Daily summary:** {'on' if cfg.digest else 'off'} (/digest)"
         f" · **Auto-delete:** {f'{cfg.delete_after} min after start' if cfg.delete_after is not None else 'off'} (/auto-delete)",
+        f"**Boss images:** {'on' if (bot.storage.card_style(guild_id) or (False,))[0] else 'off'} (/boss-image)",
         "",
     ]
     routes = [
@@ -705,6 +751,97 @@ def register_commands(bot: EventBot) -> None:
         ][:25]
 
     bot.tree.add_command(field)
+
+    images = app_commands.Group(
+        name="boss-image",
+        description="Add a picture to boss pings, in a style you describe or show.",
+        guild_only=True,
+        default_permissions=discord.Permissions(manage_guild=True),
+    )
+
+    def _saved_style(guild_id: int) -> tuple[bool, cards.CardStyle, bytes | None]:
+        saved = bot.storage.card_style(guild_id)
+        if saved is None:
+            return False, cards.CardStyle(), None
+        try:
+            style = cards.CardStyle.from_dict(json.loads(saved[1] or "{}"))
+        except ValueError:
+            style = cards.CardStyle()
+        return saved[0], style, saved[2]
+
+    async def _send_preview(interaction: discord.Interaction, text: str, style: cards.CardStyle, background) -> None:
+        png = await asyncio.to_thread(cards.sample, style, background)
+        await interaction.followup.send(
+            text, file=discord.File(io.BytesIO(png), filename=cards.FILENAME), ephemeral=True
+        )
+
+    @images.command(name="style", description="Set the look of boss images from a description, an example image, or both.")
+    @app_commands.describe(
+        instructions="The look you want, like: dark red and gold, gothic, glowing border, tagline Legion assemble!",
+        example="An image whose style to copy",
+        use_as_background="Also use the example image itself as the background",
+    )
+    async def image_style(
+        interaction: discord.Interaction,
+        instructions: str = "",
+        example: discord.Attachment | None = None,
+        use_as_background: bool = False,
+    ) -> None:
+        if not instructions.strip() and example is None:
+            await interaction.response.send_message(
+                "Describe the style, attach an example image, or both.", ephemeral=True
+            )
+            return
+        if example is not None and example.size > fieldboss.MAX_IMAGE_BYTES:
+            await interaction.response.send_message("That image is over 5 MB. Try a smaller one.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        image = await example.read() if example is not None else None
+        media_type = (example.content_type or "").split(";")[0] if example is not None else ""
+        background = None
+        try:
+            if image is not None and use_as_background:
+                background = cards.prepare_background(image)
+            if background is not None and not instructions.strip() and not fieldboss.is_configured():
+                style = cards.CardStyle()  # no designer available: default colors over their image
+            else:
+                style = await cards.design_style(instructions, image, media_type)
+        except cards.StyleError as e:
+            await interaction.followup.send(f"⚠️ {e}", ephemeral=True)
+            return
+        bot.storage.set_card_style(interaction.guild_id, style.to_json(), background)
+        await _send_preview(
+            interaction,
+            "Saved. Boss pings now include an image like this one. "
+            "Run /boss-image style again to change it, or /boss-image off to stop.",
+            style, background,
+        )
+
+    @images.command(name="on", description="Add an image to boss pings.")
+    async def image_on(interaction: discord.Interaction) -> None:
+        bot.storage.set_card_enabled(interaction.guild_id, True)
+        _, style, background = _saved_style(interaction.guild_id)
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        await _send_preview(
+            interaction, "Boss pings now include an image like this one. Change the look with /boss-image style.",
+            style, background,
+        )
+
+    @images.command(name="off", description="Stop adding an image to boss pings.")
+    async def image_off(interaction: discord.Interaction) -> None:
+        bot.storage.set_card_enabled(interaction.guild_id, False)
+        await interaction.response.send_message(
+            "Boss pings no longer include an image. Your style is kept for /boss-image on.", ephemeral=True
+        )
+
+    @images.command(name="preview", description="Show what boss images look like now.")
+    async def image_preview(interaction: discord.Interaction) -> None:
+        enabled, style, background = _saved_style(interaction.guild_id)
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        state = "on" if enabled else "off (turn them on with /boss-image on)"
+        await _send_preview(interaction, f"Boss images are {state}. This is a sample:", style, background)
+
+    bot.tree.add_command(images)
 
     @bot.tree.command(name="route", description="Send one category's pings to its own channel and role.")
     @admin
