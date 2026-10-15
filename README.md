@@ -30,11 +30,12 @@ Schedules come from aion2hub's [event timer](https://aion2hub.com/tools/event-ti
 6. [Hosting it 24/7](#hosting-it-247)
 7. [Field boss timers from screenshots](#field-boss-timers-from-screenshots)
 8. [Boss images](#boss-images)
-9. [Server options](#server-options)
-10. [Commands](#commands)
-11. [Updating the schedule](#updating-the-schedule)
-12. [Troubleshooting](#troubleshooting)
-13. [Project layout and development](#project-layout-and-development)
+9. [Control the bot from Claude](#control-the-bot-from-claude)
+10. [Server options](#server-options)
+11. [Commands](#commands)
+12. [Updating the schedule](#updating-the-schedule)
+13. [Troubleshooting](#troubleshooting)
+14. [Project layout and development](#project-layout-and-development)
 
 ---
 
@@ -400,6 +401,74 @@ warning.
 
 ---
 
+## Control the bot from Claude
+
+The bot comes with an [MCP](https://modelcontextprotocol.io/) server, so you can manage it by chatting with Claude in
+Claude Desktop or Claude Code. For example: *"follow all world bosses and ping 15 minutes before"*, *"what's coming up
+tonight?"*, *"Silent Dartan in Altgard respawns in 1h 20m"*, or *"make the boss image dark green with a gold glow"*.
+
+Claude can:
+
+| Tool | What it does |
+|---|---|
+| `list_servers`, `get_settings`, `list_events`, `upcoming` | Read the setup and what's coming up |
+| `setup`, `follow`, `unfollow`, `set_ping_time`, `set_options`, `set_route` | Change the same settings as the slash commands (channels and roles by name) |
+| `add_field_timer`, `remove_field_timer` | Manage field boss timers |
+| `set_boss_image`, `preview_boss_image` | Change the boss image style and see a sample |
+| `send_test_ping` | Post a sample ping |
+
+Changes reach the running bot within about 20 seconds. The MCP server writes the bot's own database, and posts test
+pings with the bot's token.
+
+### Connecting Claude to the bot on Google Cloud
+
+The deploy script installs a `sudo aion2-mcp` command on the VM. Claude on your computer starts it over SSH, so nothing
+on the VM is opened to the internet, and only people who can SSH into your Google Cloud project can use it.
+
+1. Install the [Google Cloud CLI](https://cloud.google.com/sdk/docs/install) on your computer and sign in with
+   `gcloud auth login`.
+2. Connect once by hand, so gcloud creates your SSH key and saves the VM's host key:
+   ```bash
+   gcloud compute ssh aion2-bot --zone us-central1-a --project YOUR_PROJECT_ID --command "echo ok"
+   ```
+3. Add the server to Claude.
+   - **Claude Desktop:** Settings → Developer → Edit Config, then add this to `claude_desktop_config.json` and restart
+     Claude Desktop:
+     ```json
+     {
+       "mcpServers": {
+         "aion2-bot": {
+           "command": "gcloud",
+           "args": ["compute", "ssh", "aion2-bot", "--zone", "us-central1-a", "--project", "YOUR_PROJECT_ID",
+                    "--quiet", "--command", "sudo aion2-mcp"]
+         }
+       }
+     }
+     ```
+     If Claude Desktop can't find `gcloud`, use its full path (run `which gcloud`, or `where gcloud` on Windows, where
+     it is `gcloud.cmd`).
+   - **Claude Code:**
+     ```bash
+     claude mcp add aion2-bot -- gcloud compute ssh aion2-bot --zone us-central1-a --project YOUR_PROJECT_ID --quiet --command "sudo aion2-mcp"
+     ```
+
+### Connecting Claude to a bot on your own computer
+
+Add this under `mcpServers` instead, with your own paths. `DATABASE_PATH` must be the full path of the database the bot
+uses, since Claude doesn't start the server in the bot's folder:
+```json
+"aion2-bot": {
+  "command": "/path/to/aion2-event-bot/.venv/bin/python",
+  "args": ["-m", "bot.mcp_server", "--env", "/path/to/aion2-event-bot/.env"],
+  "env": {"PYTHONPATH": "/path/to/aion2-event-bot", "DATABASE_PATH": "/path/to/aion2-event-bot/bot.db"}
+}
+```
+
+The claude.ai website and mobile apps can only reach MCP servers over a public HTTPS address, which this setup doesn't
+open.
+
+---
+
 ## Server options
 
 All of these are optional and per server. `/events` shows which are on.
@@ -531,6 +600,8 @@ bot/
   watcher.py     Daily aion2hub check: reads the pages, finds changed times, applies them
   fieldboss.py   Field boss timers: reads screenshots with Claude, and parses typed-in times
   cards.py       Boss images: draws them with Pillow, and designs styles with Claude
+  control.py     Bot settings as plain functions, used by the MCP server
+  mcp_server.py  MCP server so Claude can manage the bot
 tests/           pytest tests for the schedule, pings, delivery, options, aion2hub check, field bosses and boss images
 deploy/          systemd service file
 Dockerfile       Container image
