@@ -56,6 +56,12 @@ CREATE TABLE IF NOT EXISTS posted (
     delete_at  INTEGER NOT NULL,
     PRIMARY KEY (channel_id, message_id)
 );
+CREATE TABLE IF NOT EXISTS card_style (
+    guild_id   INTEGER PRIMARY KEY,
+    enabled    INTEGER NOT NULL DEFAULT 1,
+    style      TEXT    NOT NULL DEFAULT '{}',
+    background BLOB
+);
 CREATE TABLE IF NOT EXISTS meta (
     name  TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -268,6 +274,31 @@ class Storage:
 
     def remove_posted(self, channel_id: int, message_id: int) -> None:
         self.db.execute("DELETE FROM posted WHERE channel_id = ? AND message_id = ?", (channel_id, message_id))
+        self.db.commit()
+
+    def card_style(self, guild_id: int) -> tuple[bool, str, bytes | None] | None:
+        """(enabled, style JSON, background image) for boss ping images, or None if never set."""
+        row = self.db.execute(
+            "SELECT enabled, style, background FROM card_style WHERE guild_id = ?", (guild_id,)
+        ).fetchone()
+        return (bool(row[0]), row[1], row[2]) if row else None
+
+    def set_card_style(self, guild_id: int, style_json: str, background: bytes | None) -> None:
+        """Save a boss image style and turn boss images on."""
+        self.db.execute(
+            "INSERT INTO card_style (guild_id, enabled, style, background) VALUES (?, 1, ?, ?) "
+            "ON CONFLICT(guild_id) DO UPDATE SET enabled = 1, style = excluded.style, background = excluded.background",
+            (guild_id, style_json, background),
+        )
+        self.db.commit()
+
+    def set_card_enabled(self, guild_id: int, enabled: bool) -> None:
+        """Turn boss images on or off, keeping the style. Turning on with no style uses the default one."""
+        self.db.execute(
+            "INSERT INTO card_style (guild_id, enabled) VALUES (?, ?) "
+            "ON CONFLICT(guild_id) DO UPDATE SET enabled = excluded.enabled",
+            (guild_id, int(enabled)),
+        )
         self.db.commit()
 
     def get_meta(self, name: str) -> str | None:
