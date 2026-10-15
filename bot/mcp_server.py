@@ -142,11 +142,18 @@ def build(control: Control) -> MCPServer:
                      layout=layout, border=border, pattern=pattern, uppercase=uppercase, tagline=tagline)
         return control.set_boss_image(await gid(server), enabled, style, remove_background)
 
+    @server.tool(description="Use a picture as the background of the image on boss pings, and turn the image on. "
+                             "image_url: an https link to a PNG or JPEG up to 5 MB, such as a Discord attachment's "
+                             "link. It is cropped to a 3:1 banner. set_boss_image remove_background undoes it.")
+    async def set_boss_background(image_url: str, server: str | None = None) -> Any:
+        return await control.set_boss_background(await gid(server), image_url)
+
     @server.tool(description="Show a sample of the image boss pings get, in the server's current style.")
     async def preview_boss_image(server: str | None = None) -> Any:
         return Image(data=control.boss_image_preview(await gid(server)), format="png")
 
-    @server.tool(description="Post a sample ping in the server's announcement channel, pinging its role.")
+    @server.tool(description="Post a sample world boss ping in the server's announcement channel, pinging its role, "
+                             "with the boss image when boss images are on.")
     async def send_test_ping(server: str | None = None) -> str:
         return await control.test_ping(await gid(server))
 
