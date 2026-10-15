@@ -414,8 +414,8 @@ Claude can:
 | `list_servers`, `get_settings`, `list_events`, `upcoming` | Read the setup and what's coming up |
 | `setup`, `follow`, `unfollow`, `set_ping_time`, `set_options`, `set_route` | Change the same settings as the slash commands (channels and roles by name) |
 | `add_field_timer`, `remove_field_timer` | Manage field boss timers |
-| `set_boss_image`, `preview_boss_image` | Change the boss image style and see a sample |
-| `send_test_ping` | Post a sample ping |
+| `set_boss_image`, `set_boss_background`, `preview_boss_image` | Change the boss image style or background picture (from a link), and see a sample |
+| `send_test_ping` | Post a sample world boss ping, with the boss image when images are on |
 
 Changes reach the running bot within about 20 seconds. The MCP server writes the bot's own database, and posts test
 pings with the bot's token.
@@ -445,8 +445,23 @@ on the VM is opened to the internet, and only people who can SSH into your Googl
        }
      }
      ```
-     If Claude Desktop can't find `gcloud`, use its full path (run `which gcloud`, or `where gcloud` on Windows, where
-     it is `gcloud.cmd`).
+     If Claude Desktop can't find `gcloud`, use its full path (run `which gcloud`).
+
+     **On Windows**, gcloud's SSH helper doesn't pass Claude's messages through, so use Windows' own `ssh` with the key
+     step 2 created. Find the VM's address with
+     `gcloud compute instances describe aion2-bot --zone us-central1-a --format "value(networkInterfaces[0].accessConfigs[0].natIP)"`,
+     limit the key file to your account once in PowerShell with
+     `icacls "$env:USERPROFILE\.ssh\google_compute_engine" /inheritance:r /remove "*S-1-3-4" /grant:r "${env:USERNAME}:F"`,
+     and use this entry (your Windows user name, in lower case, before the `@`):
+     ```json
+     "aion2-bot": {
+       "command": "C:\\Windows\\System32\\OpenSSH\\ssh.exe",
+       "args": ["-i", "C:\\Users\\YOU\\.ssh\\google_compute_engine", "-o", "BatchMode=yes",
+                "-o", "StrictHostKeyChecking=accept-new", "you@VM_ADDRESS", "sudo aion2-mcp"]
+     }
+     ```
+     The address only changes if the VM is stopped and started again. Edit the config with Claude Desktop fully quit
+     (tray icon → Quit), or it may write its old copy back.
    - **Claude Code:**
      ```bash
      claude mcp add aion2-bot -- gcloud compute ssh aion2-bot --zone us-central1-a --project YOUR_PROJECT_ID --quiet --command "sudo aion2-mcp"

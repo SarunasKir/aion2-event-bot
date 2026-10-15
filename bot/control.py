@@ -16,7 +16,7 @@ import aiohttp
 from mcp.server.mcpserver.exceptions import ToolError
 
 from . import cards, fieldboss, watcher
-from .announcer import FIELD_LEAD_KEY, TIME_DISPLAYS, format_ping, parse_clock
+from .announcer import FIELD_LEAD_KEY, TIME_DISPLAYS, card_time, format_ping, parse_clock
 from .schedule import EVENTS, REGION_LABELS, REGIONS, occurrences
 from .storage import GuildConfig, Storage
 
@@ -35,11 +35,11 @@ class DiscordAPI:
     def __init__(self, token: str):
         self.token = token
 
-    async def _request(self, method: str, path: str, payload: dict | None = None):
+    async def _request(self, method: str, path: str, payload: dict | None = None, data=None):
         headers = {"Authorization": f"Bot {self.token}", "User-Agent": "aion2-event-bot (mcp)"}
         try:
             async with aiohttp.ClientSession(headers=headers) as session:
-                async with session.request(method, API + path, json=payload) as resp:
+                async with session.request(method, API + path, json=payload, data=data) as resp:
                     body = await resp.json(content_type=None)
         except (aiohttp.ClientError, TimeoutError, ValueError) as e:
             raise ControlError(f"Couldn't reach Discord: {e!r}")
@@ -56,11 +56,31 @@ class DiscordAPI:
     async def roles(self, guild_id: int) -> list[dict]:
         return await self._request("GET", f"/guilds/{guild_id}/roles")
 
-    async def send(self, channel_id: int, content: str, role_id: int | None) -> dict:
+    async def send(self, channel_id: int, content: str, role_id: int | None, image: bytes | None = None) -> dict:
         mentions = {"parse": [], "roles": [str(role_id)] if role_id else []}
-        return await self._request(
-            "POST", f"/channels/{channel_id}/messages", {"content": content, "allowed_mentions": mentions}
-        )
+        payload = {"content": content, "allowed_mentions": mentions}
+        if image is None:
+            return await self._request("POST", f"/channels/{channel_id}/messages", payload)
+        form = aiohttp.FormData()
+        form.add_field("payload_json", json.dumps(payload), content_type="application/json")
+        form.add_field("files[0]", image, filename=cards.FILENAME, content_type="image/png")
+        return await self._request("POST", f"/channels/{channel_id}/messages", data=form)
+
+    async def download(self, url: str) -> bytes:
+        """An image from a public https URL, such as a Discord attachment link."""
+        if not url.startswith("https://"):
+            raise ControlError("Give an https:// link to the image.")
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as resp:
+                    if resp.status >= 400:
+                        raise ControlError(f"Couldn't download the image: HTTP {resp.status}.")
+                    data = await resp.content.read(fieldboss.MAX_IMAGE_BYTES + 1)
+        except (aiohttp.ClientError, TimeoutError) as e:
+            raise ControlError(f"Couldn't download the image: {e!r}")
+        if len(data) > fieldboss.MAX_IMAGE_BYTES:
+            raise ControlError("That image is over 5 MB. Use a smaller one.")
+        return data
 
 
 def _iso(dt: datetime) -> str:
@@ -318,6 +338,16 @@ class Control:
             self.storage.set_card_enabled(guild_id, False)
         return self.settings(guild_id)["boss_images"]
 
+    async def set_boss_background(self, guild_id: int, image_url: str) -> dict:
+        """Use the image at image_url as the background of boss images, and turn them on."""
+        try:
+            background = cards.prepare_background(await self._api().download(image_url))
+        except cards.StyleError as e:
+            raise ControlError(str(e))
+        saved = self.storage.card_style(guild_id)
+        self.storage.set_card_style(guild_id, _style(saved).to_json(), background)
+        return self.settings(guild_id)["boss_images"]
+
     def boss_image_preview(self, guild_id: int) -> bytes:
         saved = self.storage.card_style(guild_id)
         return cards.sample(_style(saved), saved[2] if saved else None)
@@ -328,10 +358,17 @@ class Control:
         cfg = self.config(guild_id)
         if not cfg.channel_id:
             raise ControlError("This server has no channel yet. Call setup first.")
-        start = datetime.now(timezone.utc) + timedelta(minutes=cfg.lead_minutes)
-        text = "🧪 Test announcement (sent from Claude)\n" + format_ping([EVENTS["spacetime_rift"]], start, cfg)
-        await self._api().send(cfg.channel_id, text, cfg.role_id)
-        return f"Sent a test ping to channel {cfg.channel_id}."
+        now = datetime.now(timezone.utc)
+        start = now + timedelta(minutes=cfg.lead_minutes)
+        boss = EVENTS["executor_argo"]
+        text = "🧪 Test announcement (sent from Claude)\n" + format_ping([boss], start, cfg)
+        saved = self.storage.card_style(guild_id)
+        image = None
+        if saved and saved[0]:
+            image = cards.render(_style(saved), "World boss", boss.name, card_time(start, cfg.region, now),
+                                 boss.description, saved[2])
+        await self._api().send(cfg.channel_id, text, cfg.role_id, image)
+        return f"Sent a test boss ping {'with' if image else 'without'} the boss image to channel {cfg.channel_id}."
 
 
 def _lead(minutes: int) -> int:

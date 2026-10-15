@@ -25,9 +25,14 @@ class FakeDiscord:
     async def roles(self, guild_id):
         return [{"id": "1", "name": "@everyone"}, {"id": "20", "name": "Bosses"}, {"id": "21", "name": "PvP"}]
 
-    async def send(self, channel_id, content, role_id):
-        self.sent.append((channel_id, content, role_id))
+    async def send(self, channel_id, content, role_id, image=None):
+        self.sent.append((channel_id, content, role_id, image))
         return {"id": "99"}
+
+    async def download(self, url):
+        out = io.BytesIO()
+        Image.new("RGB", (600, 600), "purple").save(out, "PNG")
+        return out.getvalue()
 
 
 def make(tmp_path, configured=True):
@@ -128,8 +133,13 @@ def test_boss_image_style_changes_only_what_is_given(tmp_path):
 def test_test_ping_posts_through_discord(tmp_path):
     c, discord = make(tmp_path)
     run(c.test_ping(1))
-    channel, text, role = discord.sent[0]
-    assert (channel, role) == (10, 20) and "Spacetime Rift" in text
+    channel, text, role, image = discord.sent[0]
+    assert (channel, role) == (10, 20) and "Executor Argo" in text and image is None
+    state = run(c.set_boss_background(1, "https://cdn.example/boss.png"))
+    assert state["enabled"] is True and c.storage.card_style(1)[2]
+    run(c.test_ping(1))
+    with Image.open(io.BytesIO(discord.sent[1][3])) as img:
+        assert img.size == (1200, 400)
 
 
 def test_mcp_server_lists_tools_and_returns_errors(tmp_path):
