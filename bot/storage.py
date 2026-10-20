@@ -272,9 +272,10 @@ class Storage:
         )
         self.db.commit()
 
-    def posted_due(self, now_ts: int) -> list[tuple[int, int]]:
+    def posted_due(self, now_ts: int) -> list[tuple[int, int, int]]:
+        """(channel_id, message_id, delete_at) of pings due for deletion."""
         return self.db.execute(
-            "SELECT channel_id, message_id FROM posted WHERE delete_at <= ?", (now_ts,)
+            "SELECT channel_id, message_id, delete_at FROM posted WHERE delete_at <= ?", (now_ts,)
         ).fetchall()
 
     def remove_posted(self, channel_id: int, message_id: int) -> None:

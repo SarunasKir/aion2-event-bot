@@ -40,7 +40,7 @@ def test_parse_when(text, delta):
     assert fieldboss.parse_when(text, "KR", NOW) == NOW + delta
 
 
-@pytest.mark.parametrize("text", ["soon", "", "0m", "at 25:00"])
+@pytest.mark.parametrize("text", ["soon", "", "0m", "at 25:00", "169h", "99999999h", "99999999999:0:0"])
 def test_parse_when_rejects(text):
     assert fieldboss.parse_when(text, "KR", NOW) is None
 

@@ -21,6 +21,7 @@ log = logging.getLogger("aion2bot.fieldboss")
 
 MODEL = os.getenv("FIELD_BOSS_MODEL", "claude-opus-5-5")
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
+MAX_TIMER_SECONDS = 7 * 24 * 3600  # field boss timers further out than a week are typos
 IMAGE_TYPES = {"image/png", "image/jpeg", "image/webp", "image/gif"}
 
 # Field bosses aion2hub lists by zone (https://aion2hub.com/tools/world-bosses).
@@ -179,14 +180,13 @@ def parse_when(text: str, region: str, now: datetime) -> datetime | None:
         return _clock_to_utc(text[3:], region, now)
     parts = text.split(":")
     if len(parts) == 3 and all(p.isdigit() for p in parts):
-        h, m, s = map(int, parts)
-        return now + timedelta(hours=h, minutes=m, seconds=s)
-    m = _DURATION_RE.match(text)
-    if m and any(m.groups()):
+        h, mi, s = map(int, parts)
+    elif (m := _DURATION_RE.match(text)) and any(m.groups()):
         h, mi, s = (int(g or 0) for g in m.groups())
-        total = timedelta(hours=h, minutes=mi, seconds=s)
-        return now + total if total.total_seconds() > 0 else None
-    return None
+    else:
+        return None
+    seconds = h * 3600 + mi * 60 + s
+    return now + timedelta(seconds=seconds) if 0 < seconds <= MAX_TIMER_SECONDS else None
 
 
 def parse_duration_minutes(text: str) -> int | None:

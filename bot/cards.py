@@ -24,6 +24,7 @@ from . import fieldboss
 log = logging.getLogger("aion2bot.cards")
 
 W, H = 1200, 400
+MAX_PIXELS = 40_000_000  # a small PNG can still decode to gigabytes; refuse those
 FILENAME = "boss.jpg"  # JPEG: about a fifth the size of PNG for photo backgrounds, and far faster to encode
 
 CHOICES = {
@@ -115,6 +116,9 @@ def prepare_background(image: bytes) -> bytes:
     """Crop an example image to the card's shape and store it as a JPEG. Raises StyleError."""
     try:
         with Image.open(io.BytesIO(image)) as src:
+            if src.width * src.height > MAX_PIXELS:
+                raise StyleError("That image is too large. Use one under 40 megapixels.")
+            src.draft("RGB", (W * 2, H * 2))  # JPEGs decode at a reduced size: less memory and time
             bg = ImageOps.fit(ImageOps.exif_transpose(src).convert("RGB"), (W, H), Image.Resampling.LANCZOS)
     except (OSError, ValueError, Image.DecompressionBombError):
         raise StyleError("I couldn't open that image. Try a PNG or JPEG.")

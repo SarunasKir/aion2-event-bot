@@ -80,6 +80,16 @@ def test_failed_ping_is_retried(tmp_path):
     assert len(ch.sent) == 1
 
 
+@pytest.mark.parametrize("error", [OSError("dns"), asyncio.TimeoutError()])
+def test_ping_lost_to_network_trouble_is_retried(tmp_path, error):
+    ch = FakeChannel(fail=error)
+    bot, _, _ = make_bot(tmp_path, ch)
+    run(bot)
+    assert ch.sent == []
+    run(bot)
+    assert len(ch.sent) == 1
+
+
 def test_missing_permission_warns_owner_once_then_recovers(tmp_path):
     ch = FakeChannel(can_send=False)
     bot, _, owner = make_bot(tmp_path, ch)
