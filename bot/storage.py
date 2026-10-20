@@ -109,7 +109,12 @@ def _config(row) -> GuildConfig:
 
 class Storage:
     def __init__(self, path: str):
-        self.db = sqlite3.connect(path)
+        # The MCP server writes the same file from another process: wait for its lock instead of failing.
+        self.db = sqlite3.connect(path, timeout=10)
+        # WAL with synchronous=NORMAL syncs to disk at checkpoints instead of on every small write.
+        # A crash can lose the last moment of writes but never corrupts the file.
+        self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.execute("PRAGMA synchronous=NORMAL")
         self.db.executescript(SCHEMA)
         # Older versions keyed field timers by boss only, so the same boss in two zones collided.
         pk = {row[1] for row in self.db.execute("PRAGMA table_info(field_timers)") if row[5]}

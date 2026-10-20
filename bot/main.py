@@ -59,7 +59,15 @@ AUTO_UPDATE = os.getenv("SCHEDULE_AUTO_UPDATE", "1") != "0"
 
 class EventBot(discord.Client):
     def __init__(self, storage: Storage):
-        super().__init__(intents=discord.Intents.default())
+        # The bot only needs servers, channels and roles; interactions arrive without any intent. Leaving out
+        # messages, typing, reactions and the rest means Discord doesn't stream every chat message to the bot,
+        # and caching no messages or members keeps memory flat however busy the servers are.
+        super().__init__(
+            intents=discord.Intents(guilds=True),
+            max_messages=None,
+            member_cache_flags=discord.MemberCacheFlags.none(),
+        )
+        self._next_prune = datetime.min.replace(tzinfo=timezone.utc)
         self.tree = app_commands.CommandTree(self)
         self.storage = storage
 
@@ -185,8 +193,10 @@ class EventBot(discord.Client):
                 log.exception("Check failed for guild %s", cfg.guild_id)
         try:
             await self._delete_old_pings(now)
-            self.storage.prune_field_timers(int((now - timedelta(hours=1)).timestamp()))
-            self.storage.prune_sent(int((now - timedelta(days=2)).timestamp()))
+            if now >= self._next_prune:  # old rows only need clearing now and then, not every check
+                self.storage.prune_field_timers(int((now - timedelta(hours=1)).timestamp()))
+                self.storage.prune_sent(int((now - timedelta(days=2)).timestamp()))
+                self._next_prune = now + timedelta(minutes=30)
         except Exception:  # an unhandled error would stop the check loop for good
             log.exception("Cleanup failed")
 

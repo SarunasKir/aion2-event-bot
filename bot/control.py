@@ -63,7 +63,7 @@ class DiscordAPI:
             return await self._request("POST", f"/channels/{channel_id}/messages", payload)
         form = aiohttp.FormData()
         form.add_field("payload_json", json.dumps(payload), content_type="application/json")
-        form.add_field("files[0]", image, filename=cards.FILENAME, content_type="image/png")
+        form.add_field("files[0]", image, filename=cards.FILENAME, content_type="image/jpeg")
         return await self._request("POST", f"/channels/{channel_id}/messages", data=form)
 
     async def download(self, url: str) -> bytes:

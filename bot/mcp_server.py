@@ -150,7 +150,7 @@ def build(control: Control) -> MCPServer:
 
     @server.tool(description="Show a sample of the image boss pings get, in the server's current style.")
     async def preview_boss_image(server: str | None = None) -> Any:
-        return Image(data=control.boss_image_preview(await gid(server)), format="png")
+        return Image(data=control.boss_image_preview(await gid(server)), format="jpeg")
 
     @server.tool(description="Post a sample world boss ping in the server's announcement channel, pinging its role, "
                              "with the boss image when boss images are on.")

@@ -21,7 +21,7 @@ ARGO = datetime(2026, 10, 7, 22, 30, tzinfo=KR)  # Executor Argo, Wednesday
 
 def _size(png: bytes) -> tuple[int, int]:
     with Image.open(io.BytesIO(png)) as img:
-        assert img.format == "PNG"
+        assert img.format == "JPEG"
         return img.size
 
 

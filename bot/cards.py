@@ -24,7 +24,7 @@ from . import fieldboss
 log = logging.getLogger("aion2bot.cards")
 
 W, H = 1200, 400
-FILENAME = "boss.png"
+FILENAME = "boss.jpg"  # JPEG: about a fifth the size of PNG for photo backgrounds, and far faster to encode
 
 CHOICES = {
     "font": ("sans", "serif"),
@@ -217,7 +217,7 @@ def render(
     detail: str = "",
     background: bytes | None = None,
 ) -> bytes:
-    """Draw a boss card: a small label (kind), the boss name, the spawn time and a detail line. PNG bytes."""
+    """Draw a boss card: a small label (kind), the boss name, the spawn time and a detail line. JPEG bytes."""
     img = _background(style, background)
     img = _pattern(img, style, title)
     img = _border(img, style)
@@ -277,7 +277,7 @@ def render(
     img = Image.alpha_composite(img, shadow_layer.filter(ImageFilter.GaussianBlur(3)))
     img = Image.alpha_composite(img, text_layer)
     out = io.BytesIO()
-    img.convert("RGB").save(out, "PNG", optimize=True)
+    img.convert("RGB").save(out, "JPEG", quality=90, subsampling=0)  # 4:4:4 keeps small text sharp
     return out.getvalue()
 
 
