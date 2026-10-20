@@ -109,7 +109,12 @@ def _config(row) -> GuildConfig:
 
 class Storage:
     def __init__(self, path: str):
-        self.db = sqlite3.connect(path)
+        # The MCP server writes the same file from another process: wait for its lock instead of failing.
+        self.db = sqlite3.connect(path, timeout=10)
+        # WAL with synchronous=NORMAL syncs to disk at checkpoints instead of on every small write.
+        # A crash can lose the last moment of writes but never corrupts the file.
+        self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.execute("PRAGMA synchronous=NORMAL")
         self.db.executescript(SCHEMA)
         # Older versions keyed field timers by boss only, so the same boss in two zones collided.
         pk = {row[1] for row in self.db.execute("PRAGMA table_info(field_timers)") if row[5]}
@@ -267,9 +272,10 @@ class Storage:
         )
         self.db.commit()
 
-    def posted_due(self, now_ts: int) -> list[tuple[int, int]]:
+    def posted_due(self, now_ts: int) -> list[tuple[int, int, int]]:
+        """(channel_id, message_id, delete_at) of pings due for deletion."""
         return self.db.execute(
-            "SELECT channel_id, message_id FROM posted WHERE delete_at <= ?", (now_ts,)
+            "SELECT channel_id, message_id, delete_at FROM posted WHERE delete_at <= ?", (now_ts,)
         ).fetchall()
 
     def remove_posted(self, channel_id: int, message_id: int) -> None:

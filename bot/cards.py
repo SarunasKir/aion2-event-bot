@@ -24,7 +24,8 @@ from . import fieldboss
 log = logging.getLogger("aion2bot.cards")
 
 W, H = 1200, 400
-FILENAME = "boss.png"
+MAX_PIXELS = 40_000_000  # a small PNG can still decode to gigabytes; refuse those
+FILENAME = "boss.jpg"  # JPEG: about a fifth the size of PNG for photo backgrounds, and far faster to encode
 
 CHOICES = {
     "font": ("sans", "serif"),
@@ -115,6 +116,9 @@ def prepare_background(image: bytes) -> bytes:
     """Crop an example image to the card's shape and store it as a JPEG. Raises StyleError."""
     try:
         with Image.open(io.BytesIO(image)) as src:
+            if src.width * src.height > MAX_PIXELS:
+                raise StyleError("That image is too large. Use one under 40 megapixels.")
+            src.draft("RGB", (W * 2, H * 2))  # JPEGs decode at a reduced size: less memory and time
             bg = ImageOps.fit(ImageOps.exif_transpose(src).convert("RGB"), (W, H), Image.Resampling.LANCZOS)
     except (OSError, ValueError, Image.DecompressionBombError):
         raise StyleError("I couldn't open that image. Try a PNG or JPEG.")
@@ -217,7 +221,7 @@ def render(
     detail: str = "",
     background: bytes | None = None,
 ) -> bytes:
-    """Draw a boss card: a small label (kind), the boss name, the spawn time and a detail line. PNG bytes."""
+    """Draw a boss card: a small label (kind), the boss name, the spawn time and a detail line. JPEG bytes."""
     img = _background(style, background)
     img = _pattern(img, style, title)
     img = _border(img, style)
@@ -277,7 +281,7 @@ def render(
     img = Image.alpha_composite(img, shadow_layer.filter(ImageFilter.GaussianBlur(3)))
     img = Image.alpha_composite(img, text_layer)
     out = io.BytesIO()
-    img.convert("RGB").save(out, "PNG", optimize=True)
+    img.convert("RGB").save(out, "JPEG", quality=90, subsampling=0)  # 4:4:4 keeps small text sharp
     return out.getvalue()
 
 

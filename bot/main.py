@@ -59,7 +59,15 @@ AUTO_UPDATE = os.getenv("SCHEDULE_AUTO_UPDATE", "1") != "0"
 
 class EventBot(discord.Client):
     def __init__(self, storage: Storage):
-        super().__init__(intents=discord.Intents.default())
+        # The bot only needs servers, channels and roles; interactions arrive without any intent. Leaving out
+        # messages, typing, reactions and the rest means Discord doesn't stream every chat message to the bot,
+        # and caching no messages or members keeps memory flat however busy the servers are.
+        super().__init__(
+            intents=discord.Intents(guilds=True),
+            max_messages=None,
+            member_cache_flags=discord.MemberCacheFlags.none(),
+        )
+        self._next_prune = datetime.min.replace(tzinfo=timezone.utc)
         self.tree = app_commands.CommandTree(self)
         self.storage = storage
 
@@ -185,8 +193,10 @@ class EventBot(discord.Client):
                 log.exception("Check failed for guild %s", cfg.guild_id)
         try:
             await self._delete_old_pings(now)
-            self.storage.prune_field_timers(int((now - timedelta(hours=1)).timestamp()))
-            self.storage.prune_sent(int((now - timedelta(days=2)).timestamp()))
+            if now >= self._next_prune:  # old rows only need clearing now and then, not every check
+                self.storage.prune_field_timers(int((now - timedelta(hours=1)).timestamp()))
+                self.storage.prune_sent(int((now - timedelta(days=2)).timestamp()))
+                self._next_prune = now + timedelta(minutes=30)
         except Exception:  # an unhandled error would stop the check loop for good
             log.exception("Cleanup failed")
 
@@ -279,11 +289,11 @@ class EventBot(discord.Client):
                     "so pings there aren't being posted. Give me View Channel and Send Messages there.",
                 )
                 continue
+            image = await self._card_file(guild, channel, cfg, msg.card, card_style, now)
             # Mark first so a slow send can't be posted twice by the next check;
             # undo the mark if the send fails, so the next check retries it.
             for key, ts in msg.keys:
                 self.storage.mark_sent(cfg.guild_id, key, ts)
-            image = await self._card_file(guild, channel, cfg, msg.card, card_style, now)
             try:
                 kwargs = {"view": msg.view} if msg.view is not None else {}
                 if image is not None:
@@ -310,6 +320,11 @@ class EventBot(discord.Client):
                 for key, ts in msg.keys:
                     self.storage.unmark_sent(cfg.guild_id, key, ts)
                 log.warning("Ping in guild %s failed (%s); will retry: %s", cfg.guild_id, e.status, [k for k, _ in msg.keys])
+                continue
+            except (OSError, asyncio.TimeoutError, aiohttp.ClientError) as e:  # network trouble: retry next check
+                for key, ts in msg.keys:
+                    self.storage.unmark_sent(cfg.guild_id, key, ts)
+                log.warning("Ping in guild %s failed (%r); will retry: %s", cfg.guild_id, e, [k for k, _ in msg.keys])
                 continue
             if msg.delete_at is not None and posted is not None:
                 self.storage.add_posted(channel.id, posted.id, msg.delete_at)
@@ -339,8 +354,10 @@ class EventBot(discord.Client):
         return discord.File(io.BytesIO(png), filename=cards.FILENAME)
 
     async def _delete_old_pings(self, now: datetime) -> None:
-        for channel_id, message_id in self.storage.posted_due(int(now.timestamp())):
+        for channel_id, message_id, delete_at in self.storage.posted_due(int(now.timestamp())):
             channel = self.get_channel(channel_id)
+            if channel is None and now.timestamp() - delete_at < 86400:
+                continue  # the server may just not be loaded yet after a reconnect; try again later
             if channel is not None:
                 try:
                     await channel.get_partial_message(message_id).delete()
@@ -801,7 +818,7 @@ def register_commands(bot: EventBot) -> None:
         background = None
         try:
             if image is not None and use_as_background:
-                background = cards.prepare_background(image)
+                background = await asyncio.to_thread(cards.prepare_background, image)
             if background is not None and not instructions.strip() and not fieldboss.is_configured():
                 style = cards.CardStyle()  # no designer available: default colors over their image
             else:

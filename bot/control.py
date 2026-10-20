@@ -7,6 +7,7 @@ bot posts through Discord's API (test pings) use the bot token directly.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from dataclasses import asdict
@@ -63,7 +64,7 @@ class DiscordAPI:
             return await self._request("POST", f"/channels/{channel_id}/messages", payload)
         form = aiohttp.FormData()
         form.add_field("payload_json", json.dumps(payload), content_type="application/json")
-        form.add_field("files[0]", image, filename=cards.FILENAME, content_type="image/png")
+        form.add_field("files[0]", image, filename=cards.FILENAME, content_type="image/jpeg")
         return await self._request("POST", f"/channels/{channel_id}/messages", data=form)
 
     async def download(self, url: str) -> bytes:
@@ -75,7 +76,13 @@ class DiscordAPI:
                 async with session.get(url) as resp:
                     if resp.status >= 400:
                         raise ControlError(f"Couldn't download the image: HTTP {resp.status}.")
-                    data = await resp.content.read(fieldboss.MAX_IMAGE_BYTES + 1)
+                    if (resp.content_length or 0) > fieldboss.MAX_IMAGE_BYTES:
+                        raise ControlError("That image is over 5 MB. Use a smaller one.")
+                    data = b""
+                    async for chunk in resp.content.iter_chunked(65536):
+                        data += chunk
+                        if len(data) > fieldboss.MAX_IMAGE_BYTES:
+                            break
         except (aiohttp.ClientError, TimeoutError) as e:
             raise ControlError(f"Couldn't download the image: {e!r}")
         if len(data) > fieldboss.MAX_IMAGE_BYTES:
@@ -341,7 +348,7 @@ class Control:
     async def set_boss_background(self, guild_id: int, image_url: str) -> dict:
         """Use the image at image_url as the background of boss images, and turn them on."""
         try:
-            background = cards.prepare_background(await self._api().download(image_url))
+            background = await asyncio.to_thread(cards.prepare_background, await self._api().download(image_url))
         except cards.StyleError as e:
             raise ControlError(str(e))
         saved = self.storage.card_style(guild_id)

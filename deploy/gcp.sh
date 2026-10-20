@@ -91,6 +91,8 @@ Wants=network-online.target
 User=aion2bot
 WorkingDirectory=$DIR/app
 EnvironmentFile=$DIR/.env
+# Fewer malloc arenas: noticeably less memory for a small Python app that uses a few threads.
+Environment=MALLOC_ARENA_MAX=2
 ExecStart=$DIR/venv/bin/python -m bot.main
 Restart=always
 RestartSec=10

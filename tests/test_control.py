@@ -159,3 +159,11 @@ def test_load_env_keeps_existing_variables(tmp_path, monkeypatch):
     mcp_server.load_env(str(env))
     import os
     assert os.environ["DISCORD_TOKEN"] == "abc" and os.environ["DATABASE_PATH"] == "keep.db"
+
+
+def test_database_uses_wal_so_the_bot_and_mcp_server_share_it(tmp_path):
+    s = Storage(str(tmp_path / "w.db"))
+    assert s.db.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    other = Storage(str(tmp_path / "w.db"))  # a second process, like the MCP server
+    other.save_config(GuildConfig(5, 10, 20, "KR", 10))
+    assert s.get_config(5).lead_minutes == 10

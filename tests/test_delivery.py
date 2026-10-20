@@ -80,6 +80,16 @@ def test_failed_ping_is_retried(tmp_path):
     assert len(ch.sent) == 1
 
 
+@pytest.mark.parametrize("error", [OSError("dns"), asyncio.TimeoutError()])
+def test_ping_lost_to_network_trouble_is_retried(tmp_path, error):
+    ch = FakeChannel(fail=error)
+    bot, _, _ = make_bot(tmp_path, ch)
+    run(bot)
+    assert ch.sent == []
+    run(bot)
+    assert len(ch.sent) == 1
+
+
 def test_missing_permission_warns_owner_once_then_recovers(tmp_path):
     ch = FakeChannel(can_send=False)
     bot, _, owner = make_bot(tmp_path, ch)
@@ -105,3 +115,37 @@ def test_deleted_channel_warns(tmp_path):
     bot, guild, owner = make_bot(tmp_path, None)
     run(bot)
     assert len(owner.dms) == 1 and "/setup" in owner.dms[0]
+
+
+def test_bot_only_subscribes_to_what_it_uses(tmp_path):
+    bot = EventBot(Storage(str(tmp_path / "x.db")))
+    assert bot.intents.value == discord.Intents(guilds=True).value  # no chat messages, typing or reactions
+    assert bot._connection.max_messages is None
+    assert not bot._connection.member_cache_flags.joined
+
+
+def test_old_rows_are_pruned_every_half_hour_not_every_check(tmp_path):
+    storage = Storage(str(tmp_path / "x.db"))
+    bot = EventBot(storage)
+    calls = []
+    storage.prune_sent = lambda ts: calls.append(ts)
+    bot.get_guild = lambda gid: None
+
+    import bot.main as main_mod
+    real = main_mod.datetime
+
+    class Clock(real):
+        current = NOW
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.current
+
+    main_mod.datetime = Clock
+    try:
+        for minutes in (0, 1, 29, 31):
+            Clock.current = NOW + timedelta(minutes=minutes)
+            asyncio.run(bot.check_events.coro(bot))
+    finally:
+        main_mod.datetime = real
+    assert len(calls) == 2  # at 0 and 31 minutes

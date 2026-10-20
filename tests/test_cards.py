@@ -21,7 +21,7 @@ ARGO = datetime(2026, 10, 7, 22, 30, tzinfo=KR)  # Executor Argo, Wednesday
 
 def _size(png: bytes) -> tuple[int, int]:
     with Image.open(io.BytesIO(png)) as img:
-        assert img.format == "PNG"
+        assert img.format == "JPEG"
         return img.size
 
 
@@ -50,6 +50,10 @@ def test_example_image_becomes_background():
     assert _size(cards.sample(cards.CardStyle(), background)) == (cards.W, cards.H)
     with pytest.raises(cards.StyleError):
         cards.prepare_background(b"not an image")
+    huge = io.BytesIO()
+    Image.new("L", (8000, 6000)).save(huge, "PNG")  # tiny file, 48 megapixels decoded
+    with pytest.raises(cards.StyleError, match="too large"):
+        cards.prepare_background(huge.getvalue())
 
 
 def test_style_keeps_defaults_for_bad_values():
